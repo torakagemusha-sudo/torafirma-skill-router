@@ -1,0 +1,49 @@
+name: C++ contract tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux / GCC
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: skill-router
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run tests
+        run: |
+          make clean
+          make test
+      - name: Build router
+        run: make
+      - name: Run end-to-end contract smoke
+        run: python3 tests/contract_smoke.py ./skillrouter
+
+  windows:
+    name: Windows / MSVC
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: skill-router
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build router and tests
+        shell: cmd
+        run: build_windows_msvc.bat
+      - name: Run contract tests
+        shell: cmd
+        run: build\test_library.exe
+      - name: Run end-to-end contract smoke
+        shell: cmd
+        run: python tests\contract_smoke.py .\skillrouter.exe

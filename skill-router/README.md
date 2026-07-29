@@ -1,117 +1,123 @@
-# pi-skill-router — interface + router for a skill library of any size
+# pi-skill-router — governed auto-routing for large skill libraries
 
-Local Pi package exposing the Windows `skillrouter` binary and an indexed skill
-library. A skill library that scales past a few dozen entries can't have every
-skill's name + description pasted into every context window. This inverts that:
-one skill (`skill_router`) stays in context; every other skill lives on disk,
-is **indexed (not loaded)** in SQLite, and is fetched by `skill_id` only when
-something explicitly decides to use it. `search` cost is bounded by `--top`,
-not by how many skills exist.
+Skill Router is a local-first C++20 router that lets an agent discover and load one specialized `SKILL.md` without ingesting the entire library. Version 1.1.0 adds explainable ranking, content-addressed skill revisions, fail-closed search-to-fetch identity, and enforceable consumer/operator separation.
 
-## This deployment
+## Deployment layout
 
-```
+```text
 skill-router/
-  skillrouter.exe            the package bin (package.json -> ./skillrouter.exe)
-  skill_library/             the real skill library (one dir per skill, each with SKILL.md)
-  skills/                    pi skills exposed to the agent (incl. the skill_router interface skill)
-  skill_index.db             the SQLite index (built from skill_library/ by index-skills.ps1)
-  index-skills.ps1           (re)index skill_library/ into skill_index.db
-  build_windows_msvc.bat     build skillrouter.exe with MSVC
-  main.cpp, skill_library.hpp, mcp_server.hpp, test_library.cpp, Makefile, third_party/
-  INTEGRATION_MANUAL.md      full reference (architecture, ranking, every interface)
+  skillrouter.exe
+  skill_library/                  skill bodies
+  skill_index.db                  catalogue
+  skill_index.db.telemetry.db     decisions, counters and receipts
+  skills/skill_router/            always-loaded interface skill
+  INTEGRATION_MANUAL.md
 ```
 
-## Build
+Consumers open `skill_index.db` read-only. Runtime telemetry is written to the separate telemetry database. Operators alone index and publish catalogue changes.
+
+## Build and test
 
 ```bat
-REM MSVC (Developer Command Prompt). Compiles SQLite with -DSQLITE_ENABLE_FTS5
-REM (required for hybrid search's full-text index) and publishes ./skillrouter.exe.
 build_windows_msvc.bat
+build\test_library.exe
 ```
 
-A statically-linked MinGW build is equivalent: `make windows` (produces a
-self-contained `skillrouter.exe`, no DLLs needed). Either way, `make test` /
-`build\test_library.exe` runs the suite (**47/47**).
+or:
 
-## Package for Windows
-
-From a PowerShell prompt with the Visual Studio C++ build tools available:
-
-```powershell
-.\package-windows.ps1
+```bash
+make clean
+make test
+make
 ```
 
-This performs a clean build and test, stages only the runtime files, writes a
-SHA-256 checksum manifest, and creates a versioned ZIP under `dist\`.
+The current suite contains **61/61 passing deterministic tests** locally. CI runs the same source on Linux and Windows, including an end-to-end exact-fetch and eight-worker telemetry-concurrency smoke.
 
 ## Index the library
 
+Each skill requires `name` and `description` frontmatter. `version` is optional and defaults to `1.0.0`.
+
 ```powershell
-.\index-skills.ps1        # scans skill_library/ -> skill_index.db (default paths)
+.\index-skills.ps1
 ```
 
-Re-run any time skills change: new ones are added, edited ones re-indexed (drift
-detected via a content hash, telemetry preserved), unchanged ones skipped. The
-index stores only `skill_id`, `description`, `keywords`, `path`, and telemetry —
-**never a skill body** (read fresh from disk on fetch), so index/search cost is
-independent of how large any skill is.
+The operator index computes a SHA-256 revision for every body and emits a deterministic catalogue generation.
 
-> First run of the updated binary against an existing `skill_index.db`
-> transparently builds the FTS5 full-text index (a one-time self-heal); no manual
-> re-index is required just to enable stemmed search.
+When upgrading an existing 1.0.0 catalogue, stop consumers and run a complete operator re-index before starting 1.1.0. Old short hashes are deliberately not accepted as verified revisions.
 
-## Use it (search → fetch)
+## Automatic consumer flow
 
-```bat
-skillrouter search "authenticating users with oauth" --top 5
-REM  -> ranked [{skill_id, description, score, state}] — never a body
+Search returns the ranking explanation and exact body identity:
 
-skillrouter fetch <skill_id>
-REM  -> that skill's full SKILL.md — the one moment it enters context
+```powershell
+$hit = (.\skillrouter.exe search "authenticating users with oauth" --json | ConvertFrom-Json)[0]
 ```
 
-Add `--json` for machine-readable output.
+Fetch requires the selected revision and generation:
 
-### Hybrid search (new): exact + FTS5 + fuzzy
+```powershell
+.\skillrouter.exe fetch $hit.skill_id `
+  --revision $hit.revision_id `
+  --catalog-generation $hit.catalog_generation
+```
 
-Search blends three engines, selectable with `--mode` (default `hybrid`):
+A changed file or catalogue generation is rejected; the router never silently substitutes a new body.
 
-- **exact** — token match (keywords 3.0 / name 2.0 / description 1.0). The spine.
-- **fts** — SQLite **FTS5** with the **Porter stemmer**, so morphological variants
-  and prefixes match (`train`↔`training`, `authenticating`↔`authentication`).
-- **fuzzy** — bounded edit distance for typos (`cryptografy` → `cryptography`).
+## Ranking policy
 
-FTS and fuzzy are weighted below one exact tier, so they add recall (finding
-skills a differently-worded or misspelled query would otherwise miss) without
-ever overturning a clear exact match. `--mode exact|fts|fuzzy` isolates one
-engine; `exact` reproduces the original pre-FTS behavior. If a build lacks FTS5,
-the engine degrades gracefully to exact + fuzzy.
+The policy identifier is:
+
+```text
+tf.skillrouter.hybrid-lexical.v1
+```
+
+```text
+base = exact + 0.6 * fts_norm + 0.35 * fuzzy
+score = base * telemetry_multiplier * state_multiplier
+```
+
+Exact matches score by tier: keywords `3.0`, name `2.0`, description `1.0`. FTS5 uses Porter stemming and prefix matching. Fuzzy matching uses bounded edit distance for exact-missed tokens. The telemetry multiplier is deterministic and capped; deprecated skills receive a `0.3` multiplier; ties resolve lexically by `skill_id`.
+
+Search output includes all component scores, normalized query identity, catalogue generation, revision, historical counters, and tie-break key. The current policy uses no embeddings, learned model, capability-graph distance, or hidden static priority.
+
+## Skill identity
+
+```text
+(skill_id, skill_version, revision_id, catalog_generation)
+```
+
+- `skill_id`: stable logical name;
+- `skill_version`: human-authored compatibility version;
+- `revision_id`: SHA-256 of exact body bytes;
+- `catalog_generation`: SHA-256 identity of the ranked catalogue snapshot.
+
+Loaded skills are pinned for the current task. There is no implicit hot reload.
 
 ## Interfaces
 
-The same engine is reachable four ways — telemetry and ranking behave identically:
+- **MCP stdio:** consumer search, exact fetch, stats and graveyard tools.
+- **CLI:** machine-readable search/fetch and operator administration.
+- **Loopback HTTP:** trusted local consumer integrations.
+- **Operator shell:** interactive inspection and lifecycle administration.
 
-- **CLI** — `search`, `fetch`, `index`, `stats`, `graveyard`, `register`, `use`,
-  `deprecate`, `archive`.
-- **Live shell (new)** — run `skillrouter` with **no arguments** for an
-  interactive REPL with a live status + event dashboard (skills by state,
-  telemetry, and the tail of the search/fetch event stream, refreshed each
-  prompt). `skillrouter --help` prints scripting usage instead.
-- **HTTP API** — `skillrouter serve` (loopback only): `/health`, `/stats`,
-  `/graveyard`, `/search?q=..&mode=..`, `/fetch?id=..`.
-- **MCP (new)** — `skillrouter mcp` speaks the Model Context Protocol over stdio,
-  so any MCP host can use the whole library as tools (`skill_search`,
-  `skill_fetch`, `skill_stats`, `skill_graveyard`) and resources
-  (`skill://<skill_id>`). Register e.g.:
-  `claude mcp add skillrouter -- <abs-path>\skillrouter.exe mcp --db <abs-path>\skill_index.db`
+MCP `skill_fetch` requires `skill_id`, `expected_revision`, and `catalog_generation`. MCP resources are revision-pinned as `skill://<skill_id>@sha256:<revision>`.
 
-`--db` defaults to `skill_index.db` in the working directory on every subcommand.
+## Consumer versus operator
 
-Full reference: **`INTEGRATION_MANUAL.md`** (architecture, data model, the exact
-ranking formula, complete CLI/HTTP/MCP reference, lifecycle state machine, and
-the security notes).
+```powershell
+# Consumer defaults for MCP/search/fetch/stats/serve
+.\skillrouter.exe mcp --role consumer
+
+# Explicit operator publication
+.\skillrouter.exe index .\skill_library --role operator
+```
+
+Router guards and SQLite read-only mode enforce the logical boundary. Production deployments should also use filesystem ACLs or read-only mounts so consumer identities cannot write `SKILL.md` files or the catalogue directly.
+
+## Full reference
+
+See `INTEGRATION_MANUAL.md` for the complete ranking equation, data schemas, exact fetch protocol, CLI/MCP/HTTP reference, upgrade sequence, deployment controls, and limitations.
 
 ## License
 
-MIT License. Copyright (c) 2026 Thomas Helm. See `LICENSE`.
+MIT License. Copyright (c) 2026 Thomas Helm.

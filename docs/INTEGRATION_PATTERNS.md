@@ -1,174 +1,213 @@
 # Skill Router Integration Patterns
 
-This document shows how the same `skillrouter.exe` can serve individual agents, multiple concurrent agents, human operators, scripts, and local services from one centralized skill library.
+This document shows how `skillrouter` serves individual agents, concurrent agent fleets, human operators, scripts, and local services from one governed skill library.
 
-The key property is separation of concerns:
+The key properties are:
 
 - skill bodies remain on disk;
-- only compact metadata is indexed;
-- each agent searches and fetches only the skill it needs;
-- agents do not load or mutate one another's active context;
-- shared ranking telemetry is centralized and auditable.
+- the catalogue contains compact searchable metadata and immutable SHA-256 revision identities;
+- only the selected skill body is fetched;
+- every routing decision is explainable and replayable against its recorded inputs;
+- consumer processes open the catalogue read-only;
+- runtime telemetry is written to a separate database;
+- publication is an operator function, not an agent-consumer function;
+- loaded skill revisions are pinned for the current task and never hot-reloaded implicitly.
+
+The exact formula and identity semantics are defined in [Ranking and Load-Time Identity Contract](RANKING_AND_IDENTITY_CONTRACT.md). Open evidence points are tracked in [Architecture Measurement Ledger](ARCHITECTURE_MEASUREMENT_LEDGER.md).
 
 ## 1. Single-agent automatic routing
 
 ```mermaid
 flowchart LR
     U[User task] --> A[Agent]
-    A -->|MCP tool call| R[skillrouter.exe]
-    R --> I[(SQLite metadata index)]
-    R --> L[(Skill library on disk)]
-    I --> R
-    L -->|Selected SKILL.md only| R
-    R -->|Search result and fetched skill| A
+    A -->|skill_search| R[Consumer skillrouter]
+    R -->|read-only| C[(Catalogue generation)]
+    R -->|append| T[(Telemetry DB)]
+    C --> R
+    R -->|ranked candidate + revision + generation| A
+    A -->|skill_fetch with exact revision| R
+    R -->|verified SKILL.md only| A
     A --> O[Task output]
 ```
 
-The user states the underlying task. The agent decides whether specialist capability may help, invokes the router internally, loads one selected skill, and continues without exposing a manual skill-selection step.
+The user states the underlying task. The agent invokes the router internally, receives bounded ranked candidates, selects one, and fetches the exact revision returned by search. The user does not manually browse or choose a skill.
 
-## 2. Centralized library serving multiple agents
+## 2. Centralized consumer service for multiple agents
 
 ```mermaid
 flowchart TB
     subgraph Agents[Concurrent agents]
-        A1[Agent A\nCode]
-        A2[Agent B\nResearch]
-        A3[Agent C\nOperations]
-        A4[Agent D\nReview]
+        A1[Agent A]
+        A2[Agent B]
+        A3[Agent C]
+        A4[Agent D]
     end
 
-    A1 -->|search / fetch| R[Central skillrouter service]
-    A2 -->|search / fetch| R
-    A3 -->|search / fetch| R
-    A4 -->|search / fetch| R
+    A1 -->|search / exact fetch| R[Central consumer router]
+    A2 -->|search / exact fetch| R
+    A3 -->|search / exact fetch| R
+    A4 -->|search / exact fetch| R
 
-    R --> I[(Shared SQLite metadata index)]
-    R --> L[(Central skill library)]
-    R --> T[(Shared telemetry)]
+    R -->|read-only| C[(Published catalogue)]
+    R -->|read-only| L[(Skill library)]
+    R -->|append decisions and receipts| T[(Shared telemetry)]
 
-    I --> R
-    L -->|Only each selected skill body| R
-
-    R -->|Skill X| A1
-    R -->|Skill Y| A2
-    R -->|Skill Z| A3
-    R -->|Skill X| A4
+    R -->|Skill X @ revision a| A1
+    R -->|Skill Y @ revision b| A2
+    R -->|Skill Z @ revision c| A3
+    R -->|Skill X @ revision a| A4
 ```
 
-Multiple agents can use one governed library simultaneously. Each receives only its selected `SKILL.md`; no agent is required to ingest the complete catalogue, and one agent's active skill context is not injected into another agent's context.
+Agents share ranking telemetry and catalogue state without sharing active prompt context. The service can serve the same immutable skill revision to several agents concurrently.
 
-Concurrency concerns are concentrated in the shared storage and transport layer rather than in prompt composition. Integrators should still use normal filesystem and process-isolation controls when agents may modify library files.
-
-## 3. One library, multiple transport interfaces
+## 3. One library, multiple consumer transports
 
 ```mermaid
 flowchart LR
     subgraph Clients
         M[MCP-capable agent]
-        S[Human operator]
+        S[Human inspector]
         C[CLI script or CI]
-        H[Local application]
+        H[Trusted local application]
     end
 
-    M -->|stdio MCP| R[skillrouter.exe]
-    S -->|interactive shell| R
-    C -->|subcommands and JSON| R
+    M -->|stdio MCP| R[Consumer router engine]
+    S -->|read-only commands| R
+    C -->|CLI + JSON| R
     H -->|loopback HTTP| R
 
-    R --> I[(One index)]
-    R --> L[(One skill library)]
-    R --> T[(One telemetry stream)]
+    R -->|read-only| I[(One published catalogue)]
+    R -->|read-only| L[(One skill library)]
+    R -->|append| T[(One telemetry stream)]
 ```
 
-The MCP server, interactive shell, command-line interface, and loopback HTTP API are different front ends over the same routing engine and lifecycle state.
+MCP, CLI, and loopback HTTP are transport projections over the same ranker and exact-fetch contract. Direct operator administration should run through a separately privileged process.
 
-## 4. Per-agent process isolation with a shared library
+## 4. Per-agent process isolation with shared immutable catalogue
 
 ```mermaid
 flowchart TB
-    L[(Read-mostly central skill library)]
-    I[(Central or replicated metadata index)]
+    L[(Read-only skill library)]
+    C[(Read-only catalogue generation)]
+    T[(Shared writable telemetry DB)]
 
-    A1[Agent A] --> R1[Router process A]
-    A2[Agent B] --> R2[Router process B]
-    A3[Agent C] --> R3[Router process C]
+    A1[Agent A] --> R1[Consumer router A]
+    A2[Agent B] --> R2[Consumer router B]
+    A3[Agent C] --> R3[Consumer router C]
 
     R1 --> L
     R2 --> L
     R3 --> L
-
-    R1 --> I
-    R2 --> I
-    R3 --> I
+    R1 --> C
+    R2 --> C
+    R3 --> C
+    R1 --> T
+    R2 --> T
+    R3 --> T
 ```
 
-Use one router process per agent when process-level fault isolation is more important than maintaining one long-lived service. The skill library should normally be treated as read-only during agent execution; indexing and library administration can be assigned to a separate operator process.
+Use one consumer router per agent when process-level fault isolation matters. Each process opens the catalogue with SQLite read-only flags. The operating-system identity should also receive read-only permission over the catalogue and skill bodies; only the telemetry database is writable.
 
-## 5. Central service with governed publication
+## 5. Governed publication and atomic generation turnover
 
 ```mermaid
 flowchart LR
     D[Skill author] --> V[Validation and review]
-    V -->|admitted| L[(Central skill library)]
     V -->|rejected| Q[Quarantine]
-    L --> X[Indexing process]
-    X --> I[(SQLite metadata index)]
-    I --> R[Router service]
-    L --> R
-    R --> A1[Agent fleet]
-    R --> A2[Interactive shell]
-    R --> A3[Local integrations]
+    V -->|admitted| P[Operator publisher]
+    P --> N[(Next catalogue generation)]
+    P --> O[(Content-addressed skill bodies)]
+    N -->|validate + atomic publish| C[(Current catalogue generation)]
+    C --> R1[Consumer router fleet]
+    O --> R1
+    R1 --> T[(Runtime telemetry)]
 ```
 
-This pattern separates skill publication from skill consumption. New or modified skills pass validation before entering the active library, reducing the chance that one agent publishes malformed or unsafe instructions directly into the shared capability surface.
+Publication is separated from consumption. The operator validates skills, computes revisions, indexes the complete admitted set, and publishes a new generation. Consumers do not modify the live generation. A search made against generation `g` must fetch against `g`; a generation change produces a fail-closed mismatch and requires a fresh search.
 
-## 6. Mixed local development pattern
+## 6. Mixed local development
 
 ```mermaid
 flowchart TB
-    Dev[Developer]
-    Shell[Interactive shell]
-    Tests[CLI smoke tests]
-    Agent[MCP agent]
-    App[Local HTTP client]
-    Router[skillrouter.exe]
-    Index[(skill_index.db)]
-    Library[(skill_library)]
+    Dev[Developer / operator]
+    Shell[Operator shell]
+    Tests[Contract tests]
+    Publisher[Indexer / publisher]
+    Agent[MCP consumer]
+    App[HTTP consumer]
 
     Dev --> Shell
     Dev --> Tests
-    Shell --> Router
-    Tests --> Router
-    Agent --> Router
-    App --> Router
-    Router --> Index
-    Router --> Library
+    Dev --> Publisher
+    Publisher --> C[(Read-write development catalogue)]
+    Agent --> R[Read-only consumer router]
+    App --> R
+    R --> C
+    R --> T[(Telemetry DB)]
 ```
 
-This is the simplest development setup: one executable and one library are exercised through every supported interface, making it easier to verify that ranking, lifecycle state, and telemetry behave consistently.
+A development machine can host both roles, but they remain explicit. Operator commands open the catalogue read-write. Search, fetch, HTTP, and MCP default to consumer/read-only behaviour.
 
 ## Operational guidance
 
 | Concern | Recommended pattern |
 |---|---|
-| Lowest integration complexity | One MCP router process per agent host |
-| Centralized capability governance | One shared read-mostly library with a controlled publication path |
-| Strong process isolation | Separate router process per agent |
-| Shared telemetry and ranking | One central service or a coordinated shared database |
-| Human inspection and administration | Interactive shell |
-| CI, validation, and scripted maintenance | CLI with JSON output |
-| Custom local tooling | Loopback HTTP API |
+| Lowest safe integration complexity | One consumer MCP router per agent host, read-only catalogue, separate telemetry database |
+| Centralized capability governance | Immutable published catalogue with a controlled operator publication path |
+| Strong process isolation | Separate consumer router process per agent |
+| Shared telemetry and ranking | Consumer routers append to one coordinated telemetry database |
+| Human inspection | CLI or operator shell, with operator credentials only when administration is intended |
+| CI and validation | Operator indexing plus deterministic contract tests and machine-readable output |
+| Custom local tooling | Loopback HTTP consumer API |
+| High-concurrency production | Immutable catalogue generations, OS-level read-only permissions, separate telemetry storage |
+
+## Ranking boundary
+
+The ranker is `tf.skillrouter.hybrid-lexical.v1`:
+
+```text
+base = exact + 0.6 * fts_norm + 0.35 * fuzzy
+score = base * telemetry_multiplier * state_multiplier
+```
+
+Exact token matches remain dominant; FTS5 adds stemmed/prefix recall; bounded edit distance adds typo tolerance; historical suggestion-to-fetch conversion contributes a capped multiplier; deprecated skills receive a penalty; ties resolve by `skill_id`.
+
+Search returns the full score decomposition and the inputs required for replay. It does not use embeddings or capability-graph distance in this policy version.
+
+## Skill identity and temporal boundary
+
+A search result identifies a selected body with:
+
+```text
+(skill_id, skill_version, revision_id, catalog_generation)
+```
+
+Consumer fetch must present `revision_id` and `catalog_generation`. The router recomputes the body revision before return. On mismatch it returns no body.
+
+An agent that has already loaded a body keeps that exact copy for its current task. Catalogue publication does not silently hot-reload an in-flight context. Refresh requires a new search and exact fetch.
+
+## Runtime enforcement boundary
+
+Router-level enforcement includes:
+
+- SQLite read-only catalogue connections in consumer mode;
+- separate writable telemetry storage;
+- no publication tools in the MCP surface;
+- read-only guards on registration and lifecycle methods;
+- fail-closed exact revision fetches.
+
+Production deployments should add filesystem ACLs, container mounts, or equivalent controls so a compromised consumer process cannot bypass the router and write skill files directly.
 
 ## Conflict model
 
-Skill Router reduces context-level conflict because skills are selected and loaded on demand instead of placing the entire catalogue into every model context. It does not claim to eliminate all distributed-systems conflicts.
+Skill Router reduces context-level conflict by loading selected revisions on demand. It does not claim to eliminate all distributed-systems conflict.
 
-The main remaining conflict surfaces are conventional and controllable:
+Remaining measurable surfaces include:
 
-- concurrent writes to skill files;
-- concurrent administrative lifecycle changes;
-- database write contention under unusually high process concurrency;
-- different agents selecting different valid skills for the same ambiguous intent;
-- downstream conflicts caused by the skills themselves.
+- telemetry write contention under unusually high concurrency;
+- publication turnover while consumers hold an earlier generation;
+- different agents choosing different valid candidates for ambiguous intent;
+- emergency revocation of instructions already loaded into a context;
+- downstream conflicts created by the skills themselves.
 
-Treat the active skill library as read-mostly, centralize publication and lifecycle administration, and use separate working directories or process boundaries where agents may modify files.
+These are explicit system boundaries, not silent assumptions.

@@ -67,6 +67,17 @@ try {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $item) -Destination $stage
     }
     Copy-Item -LiteralPath (Join-Path $work "skillrouter.exe") -Destination $stage
+
+    $stageDocs = Join-Path $stage "docs"
+    New-Item -ItemType Directory -Path $stageDocs | Out-Null
+    foreach ($doc in @(
+        "RANKING_AND_IDENTITY_CONTRACT.md",
+        "ARCHITECTURE_MEASUREMENT_LEDGER.md",
+        "INTEGRATION_PATTERNS.md"
+    )) {
+        Copy-Item -LiteralPath (Join-Path (Join-Path $PSScriptRoot "..\docs") $doc) -Destination $stageDocs
+    }
+
     New-Item -ItemType Directory -Path (Join-Path $stage "skills") | Out-Null
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "skills\skill_router") `
         -Destination (Join-Path $stage "skills\skill_router") -Recurse

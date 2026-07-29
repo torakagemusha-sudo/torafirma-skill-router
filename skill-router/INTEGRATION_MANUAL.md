@@ -1,434 +1,536 @@
-# skill_router Integration Manual
+# Skill Router Integration Manual
 
-> **Deployment note (pi-agent).** This is the portable `pi-skill-router` package.
-> It exposes `skillrouter.exe`
-> as the package bin (`package.json`) and indexes the real `skill_library/` via
-> `index-skills.ps1` into `skill_index.db`. The engine/CLI/HTTP/MCP reference
-> below is authoritative for this build; the specific numbers in the empirical
-> section (§11) and the file-manifest layout (§14) describe the reference source
-> tree, not this deployment's skill counts or its pi-package extra files
-> (`package.json`, `skills/`, `index-skills.ps1`, `build_windows_msvc.bat`,
-> `meta_skill_package/`). Build here with `build_windows_msvc.bat` (MSVC); the
-> shipped `skillrouter.exe` may instead be a statically-linked MinGW build -
-> both are the same source. See `README.md` for the deployment quickstart.
+**Source version:** 1.1.0  
+**Ranking policy:** `tf.skillrouter.hybrid-lexical.v1`  
+**Status:** implementation complete; 61 deterministic C++ tests passing locally
 
-**Status:** core engine (incl. FTS5 stemmed + fuzzy hybrid search) + MCP
-interface 47/47 tests green; CLI verified live
-(search/fetch/index/stats/graveyard/deprecate/archive/shell/serve/mcp, all
-subcommands); HTTP API verified live including hardening edge cases; MCP
-server verified live over stdio against the real binary (initialize,
-tools/list, tools/call, resources/list, resources/read, ping, plus every
-error path); Windows `.exe` genuinely cross-compiled (statically linked) and
-execution-verified under Wine (index/search/fetch/stats all confirmed running
-correctly, not just "file(1) says PE32+"); frontmatter validated against
-XML-tag-shaped placeholder text after a real instance of it was found and
-fixed (see section 12, item 4).
+Skill Router is a local-first C++20 engine for discovering and loading large agent skill libraries without placing the complete catalogue or every skill body into model context.
 
----
+Version 1.1.0 formalizes three boundaries that were previously implicit:
 
-## 1. What this is, and what it is not
+1. the exact ranking function and its replay record;
+2. the identity of a skill across catalogue updates;
+3. the runtime separation between consumers and publishers.
 
-**What it is:** a complete, working system that lets a model or harness use
-a skill library of arbitrary size (10, 10,000, more) while holding only ONE
-skill's name+description in context - `skill_router` itself. Every other
-skill lives on disk as an ordinary `SKILL.md`, indexed (not loaded) in
-SQLite, and is fetched into context only at the moment something explicitly
-requests it by `skill_id`.
+## 1. System model
 
-**What it is not:** a modification to Claude's actual production skill-
-loading infrastructure. That system isn't something buildable from here -
-this manual is honest about that boundary. What's delivered instead is the
-complete standalone router (engine + CLI + HTTP API) and a working harness
-integration pattern (`harness_demo.py`) that any agent loop capable of
-shelling out or making HTTP calls can wire in directly.
+A deployment contains three distinct state surfaces:
 
-## 2. Architecture
-
-```
-                 ONE skill in context: skill_router
-                          |
-                          v
-   loose query --> skillrouter search --> ranked [{skill_id, description, score}]
-                          |                      (small, ~constant size)
-                          |
-                 (caller decides to use one)
-                          |
-                          v
-                 skillrouter fetch <skill_id> --> full SKILL.md body
-                          |                      (the ONE place content loads)
-                          v
-              10,000 skills on disk, indexed
-              (not loaded) in SQLite: skill_id,
-              description, keywords, path,
-              content_hash, state, telemetry
+```text
+skill library/             SKILL.md bodies; read-only to consumers
+skill_index.db             searchable catalogue; read-only to consumers
+skill_index.db.telemetry.db routing decisions, events, counters, fetch receipts
 ```
 
-Three files make the whole system:
-- `skill_library.hpp` - the engine (SQLite-backed index, frontmatter parser,
-  deterministic scoring with telemetry boost, explicit state machine).
-- `mcp_server.hpp` - the Model Context Protocol interface: a small self-
-  contained JSON parser plus a pure, transport-agnostic JSON-RPC dispatcher
-  that maps MCP tools/resources onto the engine (see section 9).
-- `main.cpp` - `skillrouter`, the consolidated CLI + HTTP API + MCP stdio
-  binary.
+The operator indexes and publishes skills. Consumer processes search the catalogue, fetch exact content revisions, and append telemetry. Skill bodies are never stored in SQLite.
 
-Plus `third_party/sqlite3.{h,c}` (vendored amalgamation, compiled separately
-as C and linked) - the only dependency, and it's bundled, not installed.
+```text
+user task
+   |
+   v
+agent -> skill_search(query)
+   |         |
+   |         +-> ranked candidates + score components
+   |             + skill_id
+   |             + skill_version
+   |             + revision_id
+   |             + catalog_generation
+   |
+   +-> skill_fetch(skill_id, revision_id, catalog_generation)
+             |
+             +-> recompute body SHA-256
+             +-> fail closed on drift or generation change
+             +-> return exactly one verified SKILL.md
+```
+
+## 2. Roles
+
+### Consumer
+
+Consumer mode is the default for `search`, `fetch`, `stats`, `graveyard`, `serve`, and `mcp`.
+
+A consumer:
+
+- opens the catalogue with `SQLITE_OPEN_READONLY`;
+- enables `PRAGMA query_only`;
+- writes only to the separate telemetry database;
+- cannot register, index, deprecate, archive, or mutate catalogue state;
+- must exact-fetch the revision and catalogue generation returned by search.
+
+### Operator
+
+Operator mode is used by `register`, `index`, the interactive administration shell, and lifecycle commands.
+
+An operator may:
+
+- validate and index a skill;
+- publish a new revision;
+- deprecate or archive a logical skill;
+- inspect and administer lifecycle state.
+
+Use `--role operator` explicitly in scripts when the distinction matters. Publication commands already open the catalogue read-write by design.
 
 ## 3. Build
 
+### Linux or native POSIX
+
 ```bash
-cd skill_router
-make            # builds ./skillrouter (Linux/native)
-make test       # builds + runs test_library -> 47/47
-make windows    # cross-compiles skillrouter.exe (genuine, static, Wine-verified)
+cd skill-router
+make clean
+make test
+make
 ```
 
-No CMake, no package manager beyond a C++20 compiler + (for Windows)
-`mingw-w64`. The vendored `sqlite3.c` is compiled with
-`-DSQLITE_ENABLE_FTS5` (plus `-DSQLITE_THREADSAFE=1`) to enable the full-text
-index used by hybrid search (section 6); the engine still builds and runs
-without it, degrading to exact + fuzzy search. `sqlite3.c` is C, not C++ - it's compiled by `gcc`/`x86_64-w64-
-mingw32-gcc` into its own object file and linked, never `#include`d into a
-C++ translation unit (it uses `new` as a plain identifier and relies on
-implicit `void*` conversions that don't compile as C++ - this was hit and
-fixed during development, see section 12).
+SQLite is vendored and compiled with:
 
-## 4. Data model
+```text
+-DSQLITE_THREADSAFE=1
+-DSQLITE_ENABLE_FTS5
+```
 
-One `skills` table (STRICT), one `search_log` table (append-only):
+### Windows with MSVC
 
-| skills column | meaning |
+From a Visual Studio 2022 x64 Developer Command Prompt:
+
+```bat
+cd skill-router
+build_windows_msvc.bat
+build\test_library.exe
+```
+
+### Windows with MinGW
+
+```bash
+make windows
+```
+
+The engine is C++20 plus vendored SQLite. MCP uses stdio and HTTP binds only to IPv4 loopback.
+
+## 4. Frontmatter and skill identity
+
+A canonical skill begins with:
+
+```yaml
+---
+name: security-scan
+version: 1.3.0
+description: "Use for repository-wide security review and evidence-backed findings."
+---
+```
+
+Required fields:
+
+- `name`: stable logical `skill_id`;
+- `description`: searchable routing description.
+
+Optional field:
+
+- `version`: human-authored compatibility version; defaults to `1.0.0`.
+
+At registration, the complete file bytes receive:
+
+```text
+revision_id = sha256(SKILL.md bytes)
+```
+
+A loaded skill is identified by:
+
+```text
+(skill_id, skill_version, revision_id, catalog_generation)
+```
+
+The version and revision serve different purposes. The version communicates compatibility intent; the revision proves the exact bytes.
+
+## 5. Catalogue schema
+
+The catalogue stores compact metadata only:
+
+| Column | Meaning |
 |---|---|
-| `skill_id` | canonical name (frontmatter `name`), unique |
-| `description` | frontmatter `description` - the only text ever surfaced by `search` |
-| `keywords` | derived (or curated) comma-separated terms, highest scoring weight |
-| `path` | filesystem path to the real `SKILL.md` - body is read from here at fetch time, never cached in the DB |
-| `content_hash` | for drift detection on re-index |
-| `state` | the lifecycle state machine, see section 5 |
-| `search_count` / `fetch_count` | raw telemetry counters |
-| `last_searched_at` / `last_fetched_at` | timestamps |
+| `skill_id` | Logical name; unique |
+| `description` | Searchable frontmatter description |
+| `keywords` | Curated or derived searchable terms |
+| `path` | Filesystem path to the body |
+| `content_hash` | Protocol-facing SHA-256 revision ID |
+| `size_bytes` | Indexed byte size |
+| `version` | Human-authored skill version |
+| `state` | Lifecycle state |
+| legacy telemetry fields | Retained for migration compatibility; new writes use telemetry DB |
 
-`search_log` logs one row per `SUGGESTED` (per candidate returned), `FETCHED`,
-or `USED` event - the raw signal behind the ranking boost and the graveyard
-report.
+The FTS5 table is external-content over `skill_id`, `description`, and `keywords`. Triggered updates keep it synchronized with catalogue metadata.
 
-A third object, `skills_fts`, is an FTS5 external-content virtual table over
-`skills(skill_id, description, keywords)` with `content='skills'`,
-`content_rowid='id'`, `tokenize='porter unicode61'`. It stores only the inverted
-token index (the column *values* are read back from `skills`), and three
-triggers - `skills_fts_ai`/`_ad`/`_au`, the last scoped to
-`UPDATE OF skill_id, description, keywords` - keep it in sync automatically. It
-is created best-effort: if FTS5 is unavailable it is simply absent and search
-falls back to exact + fuzzy. See section 6.
+## 6. Telemetry schema
 
-**The DB never stores a skill's body.** Only `path` is stored; `fetch_body()`
-reads the file fresh every time. This is deliberate: it's what makes `search`
-and `stats` cost independent of how large any individual skill is, and it
-means editing a skill's `SKILL.md` directly is always reflected (once
-re-indexed) without any special sync step.
+The separate telemetry database contains:
 
-## 5. State machine
+### `skill_telemetry`
 
-```
-REGISTERED -> INDEXED -> ACTIVE (first fetch)
-                 |
-                 v
-              STALE (on-disk content_hash drifted, detected explicitly)
-                 |
-                 v
-              INDEXED (re-index resolves it, preserving telemetry)
+Per-skill search and fetch counters plus timestamps.
 
-INDEXED/ACTIVE -> DEPRECATED (ranked down 0.3x, still fetchable)
-INDEXED/ACTIVE -> ARCHIVED   (excluded from search by default, still fetchable with --include-archived)
-```
+### `search_log`
 
-Every transition is an explicit, guarded function call (`set_state`,
-`mark_stale_if_drifted`, the implicit `Indexed/Registered -> Active` inside
-`fetch_body`) - never an implicit side effect of an unrelated operation.
+Append-only `SUGGESTED`, `FETCHED`, `USED`, and drift-detection events.
 
-## 6. Ranking (hybrid: exact + FTS5 + fuzzy)
+### `routing_decisions`
 
-Search blends three matching engines into one `base` score. The mode is
-selectable (`SearchMode` / `--mode` / `&mode=` / MCP `mode`), defaulting to
-`hybrid`; `exact`, `fts`, and `fuzzy` isolate a single engine.
+One row per returned candidate containing the complete score decomposition and replay identity.
 
-1. **exact** - per query token, an exact token match in `keywords` scores 3.0,
-   in the skill name 2.0, in `description` 1.0 (first tier wins per token, not
-   additive across tiers). This is the spine of the score.
-2. **FTS5 stemmed full-text** - a SQLite FTS5 index over `skill_id` +
-   `description` + `keywords`, using the **Porter stemmer** so morphological
-   variants and prefixes match (`train`~`training`, `optimizer`~`optimizers`).
-   It is an *external-content* virtual table backed by the `skills` table and
-   kept in sync by triggers scoped to the indexed columns (so telemetry-only
-   updates don't churn it) - there is no second copy of the data. Query tokens
-   become an OR of quoted prefix terms (`"tok"*`); results are ranked by `bm25`
-   (keyword column weighted highest), and normalized per query into `[0.5, 1.0]`.
-3. **fuzzy** - bounded Levenshtein edit distance between each *exact-missed*
-   query token and the skill's token pool (max distance 1 for tokens <= 4 chars,
-   else 2), contributing `1 - distance/len`, averaged over the query tokens.
+### `fetch_receipts`
 
-```
-base  = exact + 0.6 * fts_norm + 0.35 * fuzzy      (fts_norm, fuzzy in [0,1])
+One row per exact-fetch attempt containing expected and observed revision/generation values and a terminal status.
+
+Separation allows the catalogue and skill library to remain read-only while runtime observations remain writable.
+
+## 7. Lifecycle state
+
+```text
+REGISTERED -> INDEXED -> ACTIVE
+                    \-> STALE
+INDEXED/ACTIVE -> DEPRECATED
+INDEXED/ACTIVE -> ARCHIVED
 ```
 
-The FTS and fuzzy weights (0.6, 0.35) sum to **0.95 < 1.0**, one exact tier - a
-deliberate invariant: FTS/fuzzy add *recall* (surfacing skills with no exact
-token hit, e.g. a stemmed or misspelled query, and breaking ties among equal
-exact scores) but can **never overturn a clear exact-token winner**. Exact stays
-dominant (`test_exact_mode_still_dominates_hybrid_ranking`). If a SQLite build
-lacks FTS5 (compiled without `-DSQLITE_ENABLE_FTS5`), `fts_enabled_` stays false
-and the engine degrades to exact + fuzzy rather than failing.
+- `INDEXED`: admitted and searchable.
+- `ACTIVE`: successfully fetched at least once by an operator-mode instance.
+- `STALE`: indexed revision no longer matches the file on disk.
+- `DEPRECATED`: searchable but multiplied by `0.3`.
+- `ARCHIVED`: excluded from search unless explicitly included.
 
-Then the same **deterministic, bounded telemetry boost** and deprecation penalty
-apply on top of `base`:
+For catalogue-generation identity, `INDEXED` and `ACTIVE` normalize to `AVAILABLE`. A first fetch therefore does not invalidate the generation.
 
-```
-conversion = fetch_count / search_count   (0 if never searched)
-boost = 1.0 + min(0.5, conversion * 0.5 + log1p(fetch_count) * 0.05)
-score = base * boost
-score *= 0.3 if state == DEPRECATED
-```
+## 8. Ranking function
 
-The boost is not a learned model - it's a transparent, auditable formula that
-nudges historically-useful skills upward over time, capped so a handful of old
-fetches can never drown out a strong fresh match (verified by
-`test_conversion_boost_reorders_over_time`, which starts two skills tied and
-shows the boost overcoming the tie only after real fetch history accrues).
+The current ranker is deterministic and lexical. It does not use embeddings, a learned classifier, capability-graph distance, or a static manual-priority field.
 
-## 7. CLI reference
+### Query normalization
 
-```
-skillrouter                             (no args)     live interactive shell + event dashboard
-skillrouter register <SKILL.md path>   [--db PATH]
-skillrouter index    <root dir>        [--db PATH]
-skillrouter search   "<query>"         [--db PATH] [--top N] [--json] [--include-archived] [--mode hybrid|exact|fts|fuzzy]
-skillrouter fetch    <skill_id>        [--db PATH] [--context "<query>"]
-skillrouter use       <skill_id>       [--db PATH] [--context "<query>"]   # ON_SKILL_MENTION hook
-skillrouter stats     [--db PATH]
-skillrouter graveyard [--db PATH] [--min-searches N]
-skillrouter deprecate <skill_id> [--db PATH]
-skillrouter archive   <skill_id> [--db PATH]
-skillrouter shell     [--db PATH]                       interactive REPL + live dashboard
-skillrouter serve     [--db PATH] [--port 8090]         HTTP API
-skillrouter mcp       [--db PATH]                        MCP server (JSON-RPC/stdio)
+Queries are lower-cased, tokenized, stopword-filtered, and deduplicated. The router records the normalized tokens and their SHA-256 digest.
+
+### Exact score
+
+For each normalized query token, only the highest matching tier counts:
+
+```text
+keywords     3.0
+skill name  2.0
+description 1.0
 ```
 
-`--db` defaults to `skill_index.db` in the working directory.
+### FTS5 score
 
-Running `skillrouter` with **no subcommand** drops straight into the same
-interactive shell as `skillrouter shell` (against the default DB). The shell
-renders a **live status dashboard** at the top of every prompt cycle - skill
-count by lifecycle state, telemetry (searches / fetches / conversion), and
-the tail of the `search_log` event stream - so `SUGGESTED`/`FETCHED`/`USED`
-events and state transitions appear as you work. Its commands: `search`,
-`fetch`, `events [N]`, `status`, `stats`, `graveyard`, `deprecate`,
-`archive`, `help`, `quit`. The dashboard is index-only (it never reads a
-skill body), so it stays cheap regardless of library size. `skillrouter -h`
-/ `--help` still prints this subcommand usage for scripting.
+FTS5 uses `porter unicode61`, prefix queries, and BM25 column weights:
 
-## 8. HTTP API
+```text
+skill_id=2.0, description=1.0, keywords=3.0
+```
 
-`skillrouter serve --db PATH --port 8090` - loopback-only (matches ctxmgr's
-posture: this is a local tool, not a public service).
+Matched raw values are normalized per query to `[0.5,1.0]`.
 
-| Method | Path | Response |
+### Fuzzy score
+
+Only exact-missed tokens enter bounded Levenshtein matching:
+
+```text
+max distance 1 for token length <= 4
+max distance 2 otherwise
+```
+
+The aggregate fuzzy score lies in `[0,1]`.
+
+### Base and final score
+
+```text
+base = exact + 0.6 * fts_norm + 0.35 * fuzzy
+
+conversion = fetch_count / search_count, or 0 when never searched
+telemetry_multiplier = 1 + min(
+    0.5,
+    0.5 * conversion + 0.05 * log1p(fetch_count)
+)
+
+state_multiplier = 0.3 when DEPRECATED, otherwise 1.0
+final_score = base * telemetry_multiplier * state_multiplier
+```
+
+FTS and fuzzy weights total `0.95`, below one exact-description tier. They can improve recall and break exact ties but cannot overturn a one-tier exact advantage.
+
+Candidates sort by descending score, then ascending `skill_id` for an exact tie.
+
+## 9. Search output
+
+Machine-readable search output includes the complete selection identity and explanation:
+
+```json
+{
+  "skill_id": "security-scan",
+  "description": "...",
+  "skill_version": "1.3.0",
+  "revision_id": "sha256:...",
+  "catalog_generation": "sha256:...",
+  "ranking_policy": "tf.skillrouter.hybrid-lexical.v1",
+  "query_digest": "sha256:...",
+  "normalized_tokens": "repository security review",
+  "search_mode": "hybrid",
+  "state": "INDEXED",
+  "score": 9.42,
+  "score_components": {
+    "exact_keyword": 6.0,
+    "exact_name": 0.0,
+    "exact_description": 1.0,
+    "fts_raw": 0.01,
+    "fts_normalized": 1.0,
+    "fts_min": 0.002,
+    "fts_max": 0.01,
+    "fuzzy": 0.0,
+    "base": 7.6,
+    "search_count": 12,
+    "fetch_count": 4,
+    "telemetry_multiplier": 1.24,
+    "state_multiplier": 1.0,
+    "tie_break_key": "security-scan"
+  }
+}
+```
+
+## 10. Exact fetch and pinning
+
+A consumer fetch requires:
+
+```text
+skill_id
+expected_revision
+catalog_generation
+```
+
+The router verifies the current generation, reads the body, computes its SHA-256, verifies the indexed revision, then verifies the expected revision.
+
+Terminal outcomes include:
+
+- `OK`;
+- `CATALOG_GENERATION_MISMATCH`;
+- `INDEX_DRIFT`;
+- `EXPECTED_REVISION_MISMATCH`.
+
+No mismatch returns a body. A successful body is pinned in the agent context for the current task. There is no implicit hot reload.
+
+## 11. CLI reference
+
+```text
+skillrouter                                      operator shell
+skillrouter register <SKILL.md>                  [--db PATH] [--telemetry-db PATH]
+skillrouter index <root>                         [--db PATH] [--telemetry-db PATH]
+skillrouter search "query"                       [--db PATH] [--telemetry-db PATH]
+                                                  [--top N] [--json]
+                                                  [--mode hybrid|exact|fts|fuzzy]
+skillrouter fetch <skill_id>                     --revision SHA256
+                                                  --catalog-generation SHA256
+                                                  [--db PATH] [--telemetry-db PATH]
+skillrouter use <skill_id>                       [--context "query"]
+skillrouter stats                                [--db PATH] [--telemetry-db PATH]
+skillrouter graveyard                            [--min-searches N]
+skillrouter deprecate <skill_id>                 [--role operator]
+skillrouter archive <skill_id>                   [--role operator]
+skillrouter serve                                [--port 8090] [--role consumer|operator]
+skillrouter mcp                                  [--role consumer|operator]
+```
+
+Defaults:
+
+```text
+catalog:   skill_index.db
+telemetry: skill_index.db.telemetry.db
+```
+
+### Operator index
+
+```powershell
+.\skillrouter.exe index .\skill_library `
+  --db .\skill_index.db `
+  --telemetry-db .\skill_telemetry.db `
+  --role operator
+```
+
+### Consumer search and exact fetch
+
+```powershell
+$hit = (.\skillrouter.exe search "windows cpp build" `
+  --db .\skill_index.db `
+  --telemetry-db .\skill_telemetry.db `
+  --role consumer `
+  --json | ConvertFrom-Json)[0]
+
+.\skillrouter.exe fetch $hit.skill_id `
+  --revision $hit.revision_id `
+  --catalog-generation $hit.catalog_generation `
+  --db .\skill_index.db `
+  --telemetry-db .\skill_telemetry.db `
+  --role consumer
+```
+
+## 12. MCP interface
+
+Start the stdio server:
+
+```powershell
+.\skillrouter.exe mcp `
+  --db C:\absolute\skill_index.db `
+  --telemetry-db C:\absolute\skill_telemetry.db `
+  --role consumer
+```
+
+### `skill_search`
+
+Input:
+
+```json
+{
+  "query": "repository security review",
+  "top": 8,
+  "mode": "hybrid",
+  "include_archived": false
+}
+```
+
+Output is a JSON array encoded in the MCP text result. Each candidate includes revision, generation, policy, and score components.
+
+### `skill_fetch`
+
+Input:
+
+```json
+{
+  "skill_id": "security-scan",
+  "expected_revision": "sha256:...",
+  "catalog_generation": "sha256:...",
+  "context": "repository security review"
+}
+```
+
+All three identity fields are mandatory.
+
+### Other tools
+
+- `skill_stats`
+- `skill_graveyard`
+
+The MCP surface intentionally contains no catalogue-publication operations.
+
+### MCP resources
+
+Resources are revision-pinned:
+
+```text
+skill://security-scan@sha256:<revision>
+```
+
+An unpinned resource URI is rejected. Resource reads still verify current catalogue generation indirectly through the indexed revision/body relationship, but agent routing should prefer `skill_search` followed by `skill_fetch`, because that path also pins the catalogue generation.
+
+## 13. HTTP interface
+
+Start the loopback service:
+
+```powershell
+.\skillrouter.exe serve --port 8090 --role consumer
+```
+
+Endpoints:
+
+| Method | Path | Result |
 |---|---|---|
-| GET | `/health` | `{"ok":true,"version":"1.0"}` |
-| GET | `/stats` | telemetry + state counts |
+| GET | `/health` | engine, policy, generation, role, telemetry summary |
+| GET | `/stats` | same operational summary |
 | GET | `/graveyard` | low-conversion candidates |
-| GET | `/search?q=...` | ranked hits (name+description only) |
-| GET | `/fetch?id=...` | full skill body (text/plain), 404 if absent |
+| GET | `/search?q=...&mode=hybrid` | detailed ranked candidates |
+| GET | `/fetch?id=...&revision=...&catalog_generation=...` | exact body or fail-closed error |
 
-Hardening carried over from the ctxmgr project's lessons, applied from the
-start here rather than re-discovered: whole-connection `try/catch` (a
-malformed request degrades to 400, never crashes the server), 2 MiB request
-cap (413 beyond it), `sigaction`-based shutdown on POSIX (plain `signal()`
-sets `SA_RESTART` on Linux and silently eats `SIGTERM`, which was the actual
-bug found in that earlier project - documented in code comments here so it
-isn't rediscovered).
+HTTP binds only to `127.0.0.1`. It has no authentication and must not be exposed or forwarded.
 
-## 9. MCP interface - serve the full library to any model
+## 14. Consumer/publisher deployment
 
-`skillrouter mcp [--db PATH]` speaks the **Model Context Protocol** over its
-stdio transport: newline-delimited JSON-RPC 2.0, one message per line,
-requests on stdin, responses on stdout, diagnostics on stderr. This is the
-lowest-common-denominator MCP transport every client supports, so *any*
-MCP-capable model host can use the full registered library by pointing at
-this one binary - no network, no extra services, matching the project's
-zero-dependency posture. Register it with a client, e.g. Claude Code:
+Recommended production layout:
 
-```bash
-claude mcp add skillrouter -- /abs/path/to/skillrouter mcp --db /abs/path/to/skill_index.db
+```text
+publisher identity:
+  skill library      read/write
+  catalogue next     read/write
+  published catalogue replace permission
+  telemetry          optional read
+
+consumer identity:
+  skill library      read-only
+  published catalogue read-only
+  telemetry          read/write
 ```
 
-(Or the equivalent `command`/`args` entry in any MCP client's config -
-`command: skillrouter`, `args: ["mcp", "--db", "<path>"]`.)
+The router enforces read-only SQLite access and method guards. The operating system should independently enforce the same boundary through ACLs, read-only mounts, containers, or service identities.
 
-**The core property crosses the protocol boundary intact.** The library
-index is exposed two complementary ways, and in both, listing/searching is
-index-only (name+description, ~constant per skill) while a skill *body* loads
-in exactly one place - the same `SkillLibrary::fetch_body()` the CLI and HTTP
-API already funnel through. Telemetry (`SUGGESTED`/`FETCHED`) accrues through
-MCP calls identically to the CLI.
+For a multi-agent host, either:
 
-**As MCP tools** (for an agent that reasons then acts):
+- run one central consumer service; or
+- run one consumer process per agent and share the immutable catalogue plus telemetry database.
 
-| tool | arguments | maps to |
-|---|---|---|
-| `skill_search` | `query` (req), `top`, `mode` (hybrid/exact/fts/fuzzy), `include_archived` | `search()` - hybrid ranked `[{skill_id, description, score, state}]`, never a body |
-| `skill_fetch` | `skill_id` (req), `context` | `fetch_body()` - the ONE place a full body loads |
-| `skill_stats` | - | `telemetry()` + `state_counts()` |
-| `skill_graveyard` | `min_searches` | `graveyard_candidates()` - suggested-often, never-fetched |
+The second pattern gives stronger fault isolation. The first gives simpler operations.
 
-**As MCP resources** (for a client that browses a resource list):
-`resources/list` enumerates the full library, one `skill://<skill_id>`
-resource per registered skill (name+description only - listing a
-10,000-skill library stays cheap); `resources/read` on a `skill://` URI
-returns that skill's full body via `fetch_body()`.
+## 15. Publication sequence
 
-**Methods implemented:** `initialize` (advertises `tools` + `resources`
-capabilities, protocol revision `2024-11-05`), `ping`, `tools/list`,
-`tools/call`, `resources/list`, `resources/read`, `resources/templates/list`,
-and notifications (e.g. `notifications/initialized`), which per JSON-RPC
-receive no reply.
+A safe publication sequence is:
 
-**Error discipline** (mirrors the HTTP API's "degrade, never crash" posture):
-malformed JSON -> JSON-RPC parse error `-32700` (null id); unknown method ->
-`-32601`; bad params (missing `name`/`uri`, non-`skill://` scheme) ->
-`-32602`/`-32600`; a resource read of an unknown skill -> `-32002`
-(resource-not-found). A *tool* failure, by MCP convention, is reported inside
-the tool result with `"isError":true` rather than as a protocol error - so a
-`skill_fetch` of a missing id returns a normal result the model can read and
-react to, not a transport-level fault.
+1. stage skill changes outside the live library;
+2. validate frontmatter and policy;
+3. index the complete candidate library in operator mode;
+4. run all contract tests and smoke tests;
+5. record the new catalogue generation;
+6. publish skill bodies and catalogue as one controlled generation;
+7. allow existing in-flight tasks to retain pinned revisions;
+8. require new searches after a generation mismatch.
 
-The protocol logic lives in `mcp_server.hpp` - pure and transport-agnostic (a
-request string in, a response string out), so the entire surface is
-unit-tested in-process without any sockets or pipes (18 of the 40 tests).
-`main.cpp`'s `cmd_mcp` is only the stdio read/write loop (with `_setmode`
-binary-mode guards on Windows so CRLF translation can't corrupt the newline
-framing). The one new capability the header needed beyond the existing
-hand-rolled JSON *output* (`json_escape`) is JSON *input*: a small,
-self-contained recursive-descent parser (objects, arrays, strings with
-`\uXXXX` + surrogate pairs, numbers, literals), added rather than pulling in a
-third-party JSON library, to hold the stdlib-first, single-dependency line.
+For stronger atomicity, publish immutable generation directories and switch a stable pointer only after validation.
 
-## 10. Harness integration (the three hook points)
+## 16. Upgrade from 1.0.0
 
-`harness_demo.py` runs all three against the real binary (not mocked):
+Version 1.0.0 used a short internal content hash and allowed bare `skill_id` fetches. Version 1.1.0 uses SHA-256 revision identities and exact consumer fetches.
 
-- **SESSION_START** - take the user's message, call `search`, format a
-  small "relevant skills" block (name+description only) for the harness to
-  prepend to context. Cost is bounded by `--top`, not library size.
-- **ON_SKILL_MENTION** - after the model responds, a cheap substring check:
-  did it reference a suggested `skill_id`? If so, call `use` - soft
-  telemetry distinct from `FETCHED` ("was it actually leaned on" vs "was it
-  opened").
-- **SESSION_END** - re-run `index` to pick up drift, then `stats` +
-  `graveyard` for operator review.
+Before starting 1.1.0 consumers against an old catalogue:
 
-Run it: `python3 harness_demo.py` - indexes the centralized
-`skill_library` (this project's own real skill descriptions), runs 3 simulated
-turns,
-and prints exactly what would be injected into context at each stage plus
-the final telemetry/graveyard report.
-
-## 11. Empirical proof of the core property
-
-Measured on the centralized  `skill_library/` (this project's own real
-skill descriptions, plus the `skill_router` interface skill itself):
-
-- Total bytes across all skill bodies: **19,117**
-- Bytes returned by one `search --top 1` call (name+description+score only): **230**
-- Ratio: **1.20%** of full-library size - and this ratio *shrinks further*
-  as the library grows, since `search` output size depends only on `--top`,
-  never on how many skills exist.
-
-## 12. Real bugs found and fixed during this build
-
-Kept here deliberately, matching this project's own doctrine of preserving
-lessons rather than burying them:
-
-1. **`sqlite3.c` is C, not C++.** Attempting to `#include` the amalgamation
-   directly into a C++ translation unit fails (`new` used as a plain
-   identifier, implicit `void*` conversions). Fixed by compiling it
-   separately with a C compiler and linking the object file - this is why
-   the Makefile has a dedicated `sqlite3.o` / `sqlite3_win.o` rule.
-2. **Windows cross-compile needs portable code, not `#ifdef` patches on
-   POSIX-only headers.** `dirent.h`/`sys/stat.h` don't exist on MinGW; fixed
-   by switching the directory walk to `std::filesystem::recursive_directory_
-   iterator` (portable, and arguably cleaner on both platforms - a case
-   where portability forced a genuine improvement, not just a workaround).
-   Sockets and shutdown handling are guarded with `#ifdef _WIN32` (Winsock2
-   vs POSIX sockets; plain `signal()` on Windows since `sigaction` doesn't
-   exist there, vs the deliberate `sigaction`-without-`SA_RESTART` fix on
-   POSIX).
-3. **Test-fixture vocabulary overlap, not an engine bug.** An early version
-   of the graveyard test used two skill descriptions that accidentally
-   shared the words "matching task", causing both to legitimately (if
-   weakly) match a query intended to isolate just one. Root-caused with a
-   standalone debug program before touching anything (confirmed the engine's
-   scoring was correct); fixed by using disjoint vocabulary in the fixture,
-   not by changing the engine.
-4. **Frontmatter `description` containing XML/HTML-tag-shaped placeholder
-   text.** The interface skill (`skill_library/skill_router/SKILL.md`)
-   originally used `"<query>"` and `<skill_id>` as prose placeholders in its
-   `description`
-   field - some skill-loading systems parse or render frontmatter in a
-   context where that reads as literal markup, not prose, and reject it.
-   Fixed the description to use word-based placeholders ("your query text"
-   instead of `<query>`), and - more importantly - added `looks_like_xml_tag()`
-   to the engine, enforced inside `register_skill()`, so this error class is
-   now caught automatically at registration time with an actionable message,
-   rather than requiring another manual audit next time. The detector is
-   deliberately conservative (`test_xml_tag_detector_does_not_flag_
-   comparisons_or_prose` guards against false-positiving on "score < 3" or
-   "a < b" style text) - it only flags substrings that are actually
-   tag-shaped (`<word>`, `</word>`), never bare comparison operators.
-
-## 13. Security & operational notes
-
-- Loopback-only HTTP bind, matching every other tool in this project.
-- The MCP server exposes no network surface at all - it is stdio only, so it
-  is reachable exactly by the local process a client launches it as (the same
-  trust boundary as running the CLI). Its JSON-RPC handling carries the HTTP
-  API's whole-request exception discipline forward: any malformed input
-  degrades to a JSON-RPC error object, never a crash of the loop.
-- Table/column names never come from user input - the schema is fixed and
-  hardcoded; all values are bound via prepared statements.
-- Skill bodies are read from disk at fetch time with no size cap on the
-  file *content* returned (a caller-side concern by design - a skill body
-  is expected to be human-authored, not attacker-controlled, in the way
-  arbitrary web content would be); `register_skill` does cap at 8 MiB to
-  reject obviously-wrong input during indexing.
-- `search`/`stats`/`graveyard` never read skill bodies at all - their cost
-  and memory footprint are bounded by the index, independent of how large
-  any individual skill file is.
-
-## 14. File manifest
-
-```
-skill_router/                 (the project directory)
-  skill_library.hpp        engine (single header)
-  mcp_server.hpp           MCP interface: JSON parser + pure JSON-RPC dispatcher (single header)
-  main.cpp                 skillrouter CLI + HTTP API + MCP stdio loop (portable: Linux + Windows)
-  test_library.cpp         47 unit tests (engine + FTS5/fuzzy + MCP)
-  Makefile                 native + `make windows` cross-compile target
-  third_party/
-    sqlite3.h / sqlite3.c  vendored amalgamation (only dependency, bundled)
-    skill_library/                the centralized library - every skill in one folder
-    README.md              in-folder docs: SKILL.md format + how any agent augments itself
-    skill_router/          the interface skill, indexed like any other + its extended manifest
-      SKILL.md
-      skill.yaml
-    gpu-compute-cuda/SKILL.md, api-design-principles/SKILL.md, ... (the rest)
-  skill_library_backup/     full directory backup of skill_library/ (regenerated)
-  skill_library.zip         portable archive of skill_library/ (regenerated)
-  skillrouter_backup.py     stdlib-only backup/zip regenerator
-  harness_demo.py           SESSION_START / ON_SKILL_MENTION / SESSION_END demo
-  README.md
-  INTEGRATION_MANUAL.md      this document
+```powershell
+# Stop consumers first.
+.\skillrouter.exe index .\skill_library `
+  --db .\skill_index.db `
+  --telemetry-db .\skill_telemetry.db `
+  --role operator
 ```
 
-(Note: `skill_library.hpp` is the engine *header*; `skill_library/` is the
-skill *folder*. Different things, related name - the header indexes the folder.)
+This re-index is mandatory. It upgrades the indexed revision values and emits the new catalogue generation. A stale pre-1.1 catalogue fails verification rather than silently returning unverified content.
+
+## 17. Validation
+
+The 1.1.0 suite contains 61 deterministic C++ tests covering:
+
+- frontmatter and version handling;
+- SHA-256 vectors;
+- catalogue and telemetry separation;
+- ranking components and deterministic tie-breaks;
+- full decision receipts;
+- exact fetch success;
+- search/fetch revision races;
+- catalogue generation turnover;
+- read-only consumer denial;
+- shared telemetry;
+- MCP tool and resource identity contracts;
+- malformed protocol and error paths.
+
+GitHub Actions builds the router, runs the 61-test C++ suite, and executes an end-to-end exact-fetch and eight-worker telemetry-concurrency smoke on Linux and Windows.
+
+## 18. Honest scope boundary
+
+Skill Router decides which instructions to surface; it does not prove those instructions are safe or correct. Third-party skills remain untrusted input to downstream agents.
+
+The engine provides deterministic selection, exact load identity, and separation of publication from consumption. It does not eliminate:
+
+- ambiguous-intent disagreement between valid candidates;
+- downstream conflicts created by skill instructions;
+- emergency revocation complexity after instructions have entered context;
+- operating-system compromise outside the router process;
+- telemetry database contention at arbitrary fleet scale.
+
+Those boundaries are explicit and measurable rather than hidden.

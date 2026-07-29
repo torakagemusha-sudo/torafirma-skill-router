@@ -1,97 +1,68 @@
 ---
 name: skill-router
-description: "Use first when a task might benefit from specialized skills in the large migrated skill library. Searches the SQLite index with the installed skillrouter.exe and fetches only the selected SKILL.md body on demand, avoiding full-library context loading."
+version: 1.1.0
+description: "Use first when a task may benefit from specialized capability in a large local skill library. Search indexed metadata, select an explainable ranked candidate, then fetch only the exact SHA-256 revision returned by search."
 ---
-# skill_router
+# skill-router
 
-The interface skill. In a library of arbitrary size, this is the **only**
-skill whose name and description a model needs to hold in context. Every
-other skill lives on disk, indexed (not loaded) in SQLite, discovered
-on-demand through this protocol.
+This is the single always-loaded interface skill for a large on-disk skill library. Do not enumerate or ingest the complete catalogue. Route internally from the user's ordinary task.
 
-## Why this exists
+## Mandatory protocol
 
-A skill list that scales to thousands of entries cannot be pasted into every
-context window - the token cost would dominate the conversation before any
-real work happened. `skill_router` inverts the relationship: instead of the
-model holding a list of skills, it holds one interface and *asks* for what
-it needs, exactly when it needs it.
+1. Translate the task into a concise capability query.
+2. Call `skill_search`.
+3. Inspect the bounded candidates and score explanations.
+4. Select the best eligible skill for the task.
+5. Call `skill_fetch` with all identity fields returned by that search result:
 
-## Protocol (the only thing to remember)
-
-```
-register a skill-library ".\skill_library"
-
-```
-skillrouter search "<query>"        -> ranked candidates: skill_id + one-line description + score
-skillrouter fetch  <skill_id>       -> the skill's full SKILL.md body (the ONLY place content loads)
+```json
+{
+  "skill_id": "selected-skill",
+  "expected_revision": "sha256:...",
+  "catalog_generation": "sha256:...",
+  "context": "the capability query"
+}
 ```
 
-Installed Windows command:
+6. Load only the returned body and continue the original task.
+7. Do not ask the user to choose a skill unless the underlying task itself is genuinely ambiguous and requires domain clarification.
 
-```
-.\skillrouter.exe search "<query>" --db .\skill_index.db
-.\skillrouter.exe fetch <skill_id> --db .\skill_index.db
-```
+## Identity rule
 
-Everything else (`register`, `index`, `stats`, `graveyard`, `deprecate`,
-`archive`, `shell`, `serve`) is for library operators, not a per-turn model
-loop - see `INTEGRATION_MANUAL.md` in this package for the full reference.
+A bare `skill_id` is not an immutable body identity. Treat the selected skill as:
 
-## Worked example
-
-```
-$ skillrouter search "optimize CUDA kernel memory access"
-gpu-compute-cuda  (score 9, INDEXED)
-    Master-level CUDA and GPU compute engineering for high-performance
-    parallel computation, writing CUDA kernels and optimizing GPU memory
-    access patterns.
-
-$ skillrouter fetch gpu-compute-cuda
----
-name: gpu-compute-cuda
-description: "..."
----
-# gpu-compute-cuda
-... (full skill body - only now does this enter context) ...
+```text
+(skill_id, skill_version, revision_id, catalog_generation)
 ```
 
-`search` cost is bounded by `top_n` (a handful of short lines), never by how
-many skills exist in the library. Measured on a real 31-skill demo corpus
-built from this project's own skill descriptions: a `search` call returns
-~1.5% of the total bytes across all 31 skill bodies - and that ratio shrinks
-further as the library grows, since `search` output size depends only on
-`top_n`, not on library size.
+Never omit `expected_revision` or `catalog_generation` in the consumer path. If fetch reports a revision or generation mismatch, repeat search against the current catalogue. Do not retry with an unpinned bare fetch.
 
-## What the router tracks, and why it improves over time
+## Temporal rule
 
-Every `search` logs one `SUGGESTED` event per returned candidate; every
-`fetch` logs one `FETCHED` event. From that:
+Once fetched, keep that exact revision for the current task. Do not silently hot-reload a newly published revision into an in-flight context. Refresh only through a new search and exact fetch.
 
-- **Ranking boost**: skills that convert suggestions into fetches for
-  similar queries rank incrementally higher over time (deterministic, bounded
-  - see `skill_library.hpp`'s `search()` for the exact formula). Not a
-  learned model; a transparent, auditable telemetry boost.
-- **Graveyard candidates**: skills suggested often but almost never fetched
-  surface via `skillrouter graveyard` - the "extract value from failure /
-  do not let every branch remain alive" signal, computed from real usage
-  rather than guessed.
-- **Drift detection**: if a skill's file changes on disk without going
-  through `register`, the next `index` pass detects the content-hash
-  mismatch and re-indexes it, routing through an explicit `STALE` state
-  rather than silently going out of sync.
+## Ranking interpretation
 
-## State machine
+The active policy is `tf.skillrouter.hybrid-lexical.v1`. It combines:
 
-`REGISTERED -> INDEXED -> ACTIVE` (first fetch) `-> STALE` (on-disk drift,
-explicit, not silent) `-> INDEXED` (re-index resolves it) `-> DEPRECATED`
-(ranked down, still fetchable) `-> ARCHIVED` (excluded from search by
-default, still fetchable with `--include-archived`).
+- exact token tiers: keywords `3.0`, name `2.0`, description `1.0`;
+- FTS5 Porter-stemmed/prefix relevance weighted `0.6`;
+- bounded edit-distance fuzzy relevance weighted `0.35`;
+- a capped historical suggestion-to-fetch multiplier;
+- lifecycle penalties;
+- lexical `skill_id` tie-breaking.
 
-## Full reference
+It is deterministic and explainable. It does not use embeddings or a learned classifier.
 
-See `INTEGRATION_MANUAL.md` for: complete CLI reference, HTTP API, the
-harness hook points (`SESSION_START` / `ON_SKILL_MENTION` / `SESSION_END`),
-the ranking formula, build instructions (Linux + genuine cross-compiled
-Windows `.exe`, both verified), and honest scope notes on what this system
-does and does not (yet) wire into.
+## Consumer boundary
+
+Normal agent use is read-only with respect to the catalogue and skill files. Runtime telemetry is written separately. Registration, indexing, deprecation, archival, and publication are operator functions and must not be invoked from the normal per-task agent loop.
+
+## Failure handling
+
+- No candidates: continue without a specialist skill or refine the capability query once.
+- `CATALOG_GENERATION_MISMATCH`: search again.
+- `REVISION_MISMATCH` or `INDEX_DRIFT`: do not load the body; report or trigger operator re-indexing.
+- Deprecated candidate: prefer an equally suitable active candidate unless the deprecated skill is explicitly required.
+
+See `INTEGRATION_MANUAL.md` for the full contract.

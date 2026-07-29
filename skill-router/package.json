@@ -1,11 +1,11 @@
 {
   "name": "pi-skill-router",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "license": "MIT",
   "author": "Thomas Helm",
-  "description": "Local Pi package exposing the Windows skillrouter binary and indexed skill library.",
-  "keywords": ["pi-package", "skills", "router"],
+  "description": "Local governed skill router with explainable ranking, content-addressed exact fetches, and read-only consumer operation.",
+  "keywords": ["pi-package", "skills", "router", "mcp", "content-addressed"],
   "type": "module",
   "bin": {
     "skillrouter": "./skillrouter.exe"

@@ -1,58 +1,121 @@
 # Torafirma Skill Router
 
-> A local-first, single-binary auto-router for discovering and loading large agent skill libraries without flooding the model context.
+> A local-first, single-binary auto-router for discovering and loading large agent skill libraries without flooding model context.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D4)
 ![Language](https://img.shields.io/badge/C%2B%2B-20-00599C)
-![Tests](https://img.shields.io/badge/tests-47%2F47-passing)
-![SQLite](https://img.shields.io/badge/SQLite-3.53.4-003B57)
+![Tests](https://img.shields.io/badge/tests-61%2F61%20local-brightgreen)
+![SQLite](https://img.shields.io/badge/SQLite-FTS5-003B57)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-> **Automatic routing — no user interaction required:** once connected to an agent through MCP or the included interface skill, the agent invokes Skill Router when a task may benefit from specialized capability, searches the local index, selects and fetches the best-matching `SKILL.md`, and continues the task. The user does not browse the library, run searches, or choose a skill manually.
+> **Automatic routing — no user interaction required:** once connected through MCP or the included interface skill, the agent searches a bounded local metadata catalogue, selects an explainable ranked candidate, exact-fetches the selected SHA-256 revision, and continues the user's original task.
 
-Skill Router keeps one small interface skill in context and leaves the full skill library on disk. It indexes only metadata in SQLite. During normal agent use, the routing loop happens automatically: intent is converted into a bounded search, a ranked skill is selected, and only that skill's full body is loaded into context.
+Skill Router keeps one small interface skill in context and leaves the full library on disk. Version 1.1.0 formalizes the ranking function, emits replayable decision records, pins skill bodies by revision and catalogue generation, and separates read-only consumers from privileged publishers.
 
-## One executable, four operating modes
+## What changed in 1.1.0 source
 
-The same `skillrouter.exe` contains the router, interactive shell, CLI, HTTP API, and MCP server. All modes use the same SQLite index, lifecycle state, deterministic ranking, and telemetry.
+- Public ranking policy: `tf.skillrouter.hybrid-lexical.v1`.
+- Full score decomposition in search output and append-only decision receipts.
+- SHA-256 `revision_id` for exact skill-body identity.
+- Deterministic `catalog_generation` for the ranked catalogue snapshot.
+- Fail-closed search-to-fetch verification.
+- Pin-on-fetch semantics; no implicit hot reload during an active task.
+- Read-only consumer catalogue connections.
+- Separate writable telemetry database.
+- Operator-only registration, indexing, deprecation, and archival.
+- Revision-pinned MCP tools and resources.
+- 61 deterministic regression and contract tests.
+- End-to-end exact-fetch and eight-worker telemetry concurrency smoke test.
+- Linux and Windows CI workflow.
 
-| Mode | Start command | Intended use | User interaction |
-|---|---|---|---|
-| **Automatic agent routing (MCP)** | `skillrouter.exe mcp --db .\skill_index.db` | An MCP-capable agent searches, selects, and fetches skills while completing the user's normal task | **None for routing:** the user only states the task |
-| **Interactive live shell** | `skillrouter.exe` | Human-operated REPL with live skill-state counts, telemetry, recent events, search, fetch, and library administration | Direct interactive use |
-| **Command-line interface** | `skillrouter.exe <command>` | Scripts, CI, diagnostics, smoke tests, indexing, and administration | Direct or automated |
-| **Loopback HTTP API** | `skillrouter.exe serve --db .\skill_index.db --port 8090` | Trusted local tools and custom integrations | Determined by the calling application |
+The packaged 1.0.0 Windows artifact remains available while the 1.1.0 source change is reviewed and packaged.
 
-Running `skillrouter.exe` with **no arguments** opens the interactive shell. Running `skillrouter.exe --help` prints the scripting and subcommand reference.
+## One executable, four interfaces
+
+| Interface | Intended use | Catalogue access |
+|---|---|---|
+| **MCP stdio** | Automatic agent routing | Consumer/read-only by default |
+| **CLI** | Automation, diagnostics, search and exact fetch | Consumer by default; explicit operator commands |
+| **Loopback HTTP** | Trusted local integrations | Consumer/read-only by default |
+| **Interactive shell** | Human administration | Operator/read-write |
+
+Running `skillrouter` with no arguments opens the operator shell. Running `skillrouter --help` prints scripting usage.
 
 ## Why it exists
 
-Large agent installations can contain hundreds or thousands of specialized skills. Injecting every skill description and body into every prompt is slow, expensive, and noisy. Skill Router reverses that model:
+Large agent installations can contain hundreds or thousands of specialized skills. Injecting every description and body into every prompt is expensive and noisy. Skill Router reverses that model:
 
-1. The user gives the agent a normal task — no routing command or skill name is required.
-2. The agent invokes the small `skill-router` interface automatically when specialized capability may help.
-3. Skill Router searches indexed metadata by natural-language intent.
-4. The agent selects a ranked candidate and fetches only that skill body.
-5. The agent continues the original task with the selected skill in context.
-6. Transparent usage telemetry improves deterministic ranking over time.
+1. The user gives the agent an ordinary task.
+2. The agent invokes the small `skill-router` interface internally.
+3. The router searches compact indexed metadata.
+4. The agent receives bounded ranked candidates with score explanations.
+5. The agent selects one candidate and exact-fetches its returned revision and generation.
+6. Only that verified `SKILL.md` enters context.
+7. Routing decisions and fetch receipts are recorded in separate telemetry storage.
 
-Search output stays bounded by `--top`; it does not grow with the size of the library.
+## Ranking contract
 
-## Highlights
+The current policy is deterministic and lexical:
 
-- Automatic intent-to-skill routing with no user selection step
-- Interactive live shell by launching `skillrouter.exe` with no arguments
-- One portable Windows x64 executable containing every interface
-- Local-first operation with no remote service dependency
-- SQLite FTS5 full-text search with Porter stemming
-- Exact, fuzzy, FTS, and hybrid ranking modes
-- CLI, interactive shell, loopback HTTP, and MCP stdio interfaces
-- Explicit skill lifecycle states and drift detection
-- Prepared SQLite statements and bounded query/file inputs
-- Deterministic SHA-256 release manifest
-- MIT licensed source
-- Reproducible MSVC packaging script
-- 47 automated C++ tests
+```text
+base = exact + 0.6 * fts_norm + 0.35 * fuzzy
+score = base * telemetry_multiplier * state_multiplier
+```
+
+Exact token tiers are:
+
+```text
+keywords     3.0
+skill name  2.0
+description 1.0
+```
+
+FTS5 uses Porter stemming and prefix matching. Fuzzy matching uses bounded Levenshtein distance only for exact-missed tokens. The historical suggestion-to-fetch multiplier is capped at `1.5`; deprecated skills receive a `0.3` multiplier; exact ties resolve by ascending `skill_id`.
+
+The policy uses no embeddings, learned classifier, capability-graph distance, or hidden manual priority.
+
+Every returned candidate includes:
+
+- normalized query and digest;
+- ranking policy and mode;
+- exact, FTS, fuzzy, telemetry, and lifecycle components;
+- `skill_id` and `skill_version`;
+- immutable `revision_id`;
+- `catalog_generation`;
+- deterministic tie-break key.
+
+See [Ranking and Load-Time Identity Contract](docs/RANKING_AND_IDENTITY_CONTRACT.md).
+
+## Load-time identity
+
+A selected skill is identified by:
+
+```text
+(skill_id, skill_version, revision_id, catalog_generation)
+```
+
+Consumer fetch requires the revision and generation returned by search. The router re-hashes the file immediately before returning it. A changed file or catalogue produces a terminal mismatch; no unverified body is returned.
+
+Once loaded, a revision remains pinned for the current task. Publication does not silently rewrite instructions already present in an agent context.
+
+## Consumer/publisher separation
+
+```mermaid
+flowchart LR
+    A[Agent fleet] -->|search + exact fetch| R[Consumer router]
+    R -->|read-only| C[(Published catalogue)]
+    R -->|read-only| L[(Skill library)]
+    R -->|append| T[(Telemetry DB)]
+
+    D[Skill author] --> V[Validation]
+    V --> P[Operator publisher]
+    P --> C
+    P --> L
+```
+
+Consumer processes open the catalogue read-only and have no MCP publication methods. Operators alone register, index, deprecate, archive, and publish. Production deployments should mirror the router boundary with filesystem ACLs or read-only mounts.
+
+See [Integration Patterns](docs/INTEGRATION_PATTERNS.md) and the [Architecture Measurement Ledger](docs/ARCHITECTURE_MEASUREMENT_LEDGER.md).
 
 ## Windows release
 
@@ -64,131 +127,15 @@ ZIP SHA-256:
 FBB8925A621A22BE13EDE6B09BAD9CA0B90DD968B71CC79AB30DF2849338865F
 ```
 
-The executable is currently unsigned. Verify the ZIP digest before running it.
+The current published executable is unsigned. Verify the ZIP digest before running it. The 1.1.0 source requires a newly packaged binary; do not assume the 1.0.0 executable implements the revision contract described above.
 
-## Quick start
+## Build 1.1.0 from source
 
-Extract the archive into a writable directory and add skills beneath `skill_library\`. Each skill directory needs a `SKILL.md` containing `name` and `description` frontmatter.
+Requirements for the provided Windows path:
 
-Index the library once:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\index-skills.ps1
-```
-
-### Option A: automatic agent routing
-
-Connect the MCP server to the agent and keep only the included `skill-router` interface skill in the agent's always-loaded context. From that point, routing is automatic from the user's perspective: the user asks for the underlying task, and the agent performs search, selection, and fetch internally.
-
-```powershell
-.\skillrouter.exe mcp --db .\skill_index.db
-```
-
-### Option B: interactive shell
-
-Launch the executable with no arguments:
-
-```powershell
-.\skillrouter.exe
-```
-
-This opens an interactive REPL with a live status and event dashboard. It shows skills by lifecycle state, usage telemetry, and the recent search/fetch event stream while exposing search, fetch, indexing, statistics, graveyard, and administrative operations from one session.
-
-### Option C: CLI and automation
-
-The same executable exposes individual commands for scripts, CI, diagnostics, and smoke tests:
-
-```powershell
-.\skillrouter.exe search "windows cpp build" --top 5 --json
-.\skillrouter.exe fetch skill-router
-.\skillrouter.exe stats
-```
-
-## Automatic routing flow
-
-```mermaid
-flowchart TD
-    U["User gives the agent a normal task"] --> A["Agent evaluates whether specialized capability may help"]
-
-    subgraph R["Automatic routing inside the agent — no user selection step"]
-        A -->|"Yes"| I["Invoke the skill-router interface through MCP"]
-        I --> S["Search bounded SQLite metadata index"]
-        S --> C{"Eligible ranked skill found?"}
-        C -->|"Yes"| F["Fetch only the selected SKILL.md body"]
-        F --> X["Load selected skill into the active context"]
-        C -->|"No"| N["Continue without loading a specialist skill"]
-    end
-
-    A -->|"No"| N
-    X --> T["Agent continues the original task"]
-    N --> T
-    T --> E["Suggestion and fetch telemetry update deterministic ranking"]
-```
-
-There is no user-facing skill browser or per-task selection prompt in the normal automatic-routing path. Search and fetch are internal agent operations exposed through MCP. The interactive shell, CLI, and HTTP API remain available for direct use, integration, administration, and observability.
-
-## Interactive shell
-
-Run the executable without a subcommand:
-
-```powershell
-.\skillrouter.exe
-```
-
-The live shell provides:
-
-- an interactive search-and-fetch workflow;
-- skill counts grouped by lifecycle state;
-- search, suggestion, fetch, and graveyard telemetry;
-- a tail of recent search/fetch events refreshed at each prompt;
-- library indexing and administrative commands without restarting the process.
-
-Use `skillrouter.exe --help` when command-oriented scripting output is preferred.
-
-## Search modes
-
-```powershell
-.\skillrouter.exe search "authentication" --mode hybrid
-.\skillrouter.exe search "authentication" --mode exact
-.\skillrouter.exe search "authentication" --mode fts
-.\skillrouter.exe search "authentcation" --mode fuzzy
-```
-
-Hybrid mode is the default. Exact matches remain dominant while FTS stemming and bounded fuzzy matching improve recall.
-
-## MCP integration
-
-Skill Router can run as a newline-delimited JSON-RPC MCP server over stdio:
-
-```powershell
-.\skillrouter.exe mcp --db .\skill_index.db
-```
-
-It exposes search, fetch, statistics, graveyard telemetry, and `skill://` resources. In an agent integration, search and fetch are tool calls made internally by the agent; they are not steps the user must perform. See the [integration manual](skill-router/INTEGRATION_MANUAL.md) for the complete protocol reference.
-
-## HTTP interface
-
-The optional HTTP interface binds to IPv4 loopback only:
-
-```powershell
-.\skillrouter.exe serve --db .\skill_index.db --port 8090
-```
-
-Available endpoints include `/health`, `/stats`, `/graveyard`, `/search`, and `/fetch`.
-
-The HTTP interface is intended for trusted local development. It does not provide authentication, so do not expose or forward the port and do not use it with confidential skill libraries on a shared machine.
-
-## Build from source
-
-Requirements:
-
-- Windows x64
-- Visual Studio 2022 C++ Build Tools
-- PowerShell 5.1 or later
-
-> **Note:** The requirements above are for the provided MSVC build path used to produce the official Windows x64 release. The source itself (`main.cpp`, `skill_library.hpp`, `mcp_server.hpp`) has no Windows-specific dependencies and can be built for other platforms (e.g. Linux, macOS) with an appropriate C++20 toolchain and your own build script; only `build_windows_msvc.bat` and `package-windows.ps1` are Windows-specific.
-
-Build and test from a Visual Studio x64 Developer Command Prompt:
+- Windows x64;
+- Visual Studio 2022 C++ Build Tools;
+- PowerShell 5.1 or later.
 
 ```powershell
 cd .\skill-router
@@ -196,57 +143,107 @@ cd .\skill-router
 .\build\test_library.exe
 ```
 
-Create a clean release:
+Linux or native POSIX:
 
-```powershell
-.\package-windows.ps1
+```bash
+cd skill-router
+make clean
+make test
+make
 ```
 
-The packager initializes the Visual Studio toolchain, builds SQLite with FTS5, runs all tests, stages an allowlisted payload, writes `SHA256SUMS.txt`, and creates a versioned ZIP under `dist\`.
+## Upgrade from 1.0.0
+
+Version 1.0.0 used a short internal hash and permitted bare fetches. Before starting a 1.1.0 consumer against an existing catalogue:
+
+1. stop all consumer router processes;
+2. build or install the 1.1.0 binary;
+3. run a complete operator index over the library;
+4. retain the emitted catalogue generation;
+5. start consumers with read-only catalogue access and separate telemetry storage.
+
+```powershell
+.\skillrouter.exe index .\skill_library `
+  --db .\skill_index.db `
+  --telemetry-db .\skill_telemetry.db `
+  --role operator
+```
+
+An old catalogue that has not been re-indexed fails revision verification rather than silently returning content.
+
+## Search and exact fetch
+
+```powershell
+$hit = (.\skillrouter.exe search "windows cpp build" `
+  --db .\skill_index.db `
+  --telemetry-db .\skill_telemetry.db `
+  --role consumer `
+  --json | ConvertFrom-Json)[0]
+
+.\skillrouter.exe fetch $hit.skill_id `
+  --revision $hit.revision_id `
+  --catalog-generation $hit.catalog_generation `
+  --db .\skill_index.db `
+  --telemetry-db .\skill_telemetry.db `
+  --role consumer
+```
+
+## MCP integration
+
+```powershell
+.\skillrouter.exe mcp `
+  --db C:\absolute\skill_index.db `
+  --telemetry-db C:\absolute\skill_telemetry.db `
+  --role consumer
+```
+
+The MCP surface exposes:
+
+- `skill_search`;
+- `skill_fetch`;
+- `skill_stats`;
+- `skill_graveyard`;
+- revision-pinned `skill://` resources.
+
+`skill_fetch` requires `skill_id`, `expected_revision`, and `catalog_generation`.
+
+## Security posture
+
+- Skill bodies are never stored in the catalogue database.
+- Consumer catalogue access is SQLite read-only with `query_only` enabled.
+- Telemetry is separated from catalogue state.
+- MCP contains no publication operation.
+- Search-to-fetch drift fails closed.
+- SQL values use prepared statements.
+- Query and body sizes are bounded.
+- HTTP is opt-in and loopback-only.
+- Third-party skill instructions remain untrusted downstream input.
+- The binary is not Authenticode-signed.
 
 ## Repository layout
 
 ```text
 .
 |-- README.md
-|-- LICENSE
+|-- docs/
+|   |-- INTEGRATION_PATTERNS.md
+|   |-- RANKING_AND_IDENTITY_CONTRACT.md
+|   `-- ARCHITECTURE_MEASUREMENT_LEDGER.md
+|-- .github/workflows/ci.yml
 |-- releases/
-|   |-- SHA256SUMS.txt
-|   `-- skill-router-windows-x64-1.0.0.zip
 `-- skill-router/
     |-- main.cpp
     |-- skill_library.hpp
     |-- mcp_server.hpp
     |-- test_library.cpp
-    |-- third_party/
-    |-- skills/skill_router/
+    |-- INTEGRATION_MANUAL.md
     |-- build_windows_msvc.bat
     |-- package-windows.ps1
     |-- index-skills.ps1
-    `-- INTEGRATION_MANUAL.md
+    |-- skills/skill_router/SKILL.md
+    `-- third_party/
 ```
-
-## Security posture
-
-- The release contains no private skill library, generated database, backup, object file, debug symbol, credential, or machine-specific user path.
-- SQLite is vendored at version 3.53.4 and compiled with FTS5.
-- SQL values are passed through prepared statements.
-- The Windows binary enables ASLR, DEP/NX, and high-entropy virtual addresses.
-- Network serving is opt-in and loopback-only.
-- MCP uses stdio and opens no network listener.
-- Skill bodies are data, not executable code, but downstream agents must still treat third-party skill instructions as untrusted.
-- Database files and indexed skill directories should come from trusted sources.
-- The binary is not Authenticode-signed; use the published SHA-256 digest.
-
-## Documentation
-
-- [Skill Router README](skill-router/README.md)
-- [Windows release guide](skill-router/WINDOWS_README.md)
-- [Complete integration manual](skill-router/INTEGRATION_MANUAL.md)
-- [Interface skill](skill-router/skills/skill_router/SKILL.md)
 
 ## License
 
 MIT License. Copyright (c) 2026 Thomas Helm.
-
-Created by Thomas Helm as part of Torafirma Systems.
