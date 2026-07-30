@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
 project(skillrouter_python LANGUAGES C CXX)
 
+set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 CONFIG REQUIRED)
 
 add_library(skillrouter_sqlite STATIC
