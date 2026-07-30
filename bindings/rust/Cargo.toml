@@ -1,0 +1,13 @@
+[package]
+name = "torafirma-skillrouter"
+version = "1.1.0"
+edition = "2021"
+license = "MIT"
+description = "Safe Rust wrapper over the Torafirma Skill Router C ABI"
+
+[dependencies]
+serde_json = "1"
+
+[build-dependencies]
+bindgen = "0.70"
+cc = "1"

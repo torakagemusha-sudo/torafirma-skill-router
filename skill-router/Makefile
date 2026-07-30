@@ -1,7 +1,6 @@
 # skillrouter - consolidated skill-library interface/router.
 # Stdlib + statically-linked SQLite amalgamation only. No package-manager
-# dependencies: third_party/sqlite3.{h,c} is vendored, so this builds
-# identically on any machine with a C++20 compiler.
+# dependencies: third_party/sqlite3.{h,c} is vendored.
 
 CXX      ?= g++
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -I.
@@ -11,15 +10,15 @@ SQLITE_DEFS = -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5
 MINGW_CXX ?= x86_64-w64-mingw32-g++
 MINGW_CC  ?= x86_64-w64-mingw32-gcc
 
-.PHONY: all test clean windows
+.PHONY: all capi test clean windows
 
-all: skillrouter
+all: skillrouter libskillrouter.a
 
-# sqlite3.c is C, not C++ (uses `new` as an identifier, implicit void*
-# conversions) -- it MUST be compiled by a C compiler into its own object
-# file and linked, never #included into a C++ translation unit.
 sqlite3.o: third_party/sqlite3.c
 	$(CC) -O2 -c third_party/sqlite3.c -o sqlite3.o $(SQLITE_DEFS)
+
+sqlite3_pic.o: third_party/sqlite3.c
+	$(CC) -O2 -fPIC -c third_party/sqlite3.c -o sqlite3_pic.o $(SQLITE_DEFS)
 
 skillrouter: main.cpp skill_library.hpp mcp_server.hpp sqlite3.o
 	$(CXX) $(CXXFLAGS) main.cpp sqlite3.o -o $@ -lpthread -ldl
@@ -27,12 +26,27 @@ skillrouter: main.cpp skill_library.hpp mcp_server.hpp sqlite3.o
 test_library: test_library.cpp skill_library.hpp mcp_server.hpp sqlite3.o
 	$(CXX) $(CXXFLAGS) test_library.cpp sqlite3.o -o $@ -lpthread -ldl
 
-test: test_library
-	./test_library
+skilllib_c.o: skilllib_c.cpp skilllib_c.h skill_library.hpp
+	$(CXX) $(CXXFLAGS) -c skilllib_c.cpp -o skilllib_c.o
 
-# Genuine cross-compiled Windows binary: statically linked (no external DLL
-# needed beyond system ws2_32), verified functional under Wine during
-# development (index/search/fetch/stats all confirmed working).
+skilllib_c_pic.o: skilllib_c.cpp skilllib_c.h skill_library.hpp
+	$(CXX) $(CXXFLAGS) -fPIC -DSKILLLIB_BUILD_SHARED -c skilllib_c.cpp -o skilllib_c_pic.o
+
+libskillrouter.a: skilllib_c.o sqlite3.o
+	ar rcs $@ skilllib_c.o sqlite3.o
+
+libskillrouter.so: skilllib_c_pic.o sqlite3_pic.o
+	$(CXX) -shared skilllib_c_pic.o sqlite3_pic.o -o $@ -lpthread -ldl
+
+test_c_api: test_c_api.cpp skilllib_c.cpp skilllib_c.h skill_library.hpp sqlite3.o
+	$(CXX) $(CXXFLAGS) test_c_api.cpp skilllib_c.cpp sqlite3.o -o $@ -lpthread -ldl
+
+capi: libskillrouter.a libskillrouter.so test_c_api
+
+test: test_library test_c_api
+	./test_library
+	./test_c_api
+
 sqlite3_win.o: third_party/sqlite3.c
 	$(MINGW_CC) -O2 -c third_party/sqlite3.c -o sqlite3_win.o $(SQLITE_DEFS)
 
@@ -43,4 +57,7 @@ skillrouter.exe: main.cpp skill_library.hpp mcp_server.hpp sqlite3_win.o
 	    -I. main.cpp sqlite3_win.o -o $@ -lws2_32
 
 clean:
-	rm -f skillrouter skillrouter.exe test_library sqlite3.o sqlite3_win.o *.db *.db-wal *.db-shm
+	rm -f skillrouter skillrouter.exe test_library test_c_api \
+	    libskillrouter.a libskillrouter.so \
+	    sqlite3.o sqlite3_pic.o sqlite3_win.o skilllib_c.o skilllib_c_pic.o \
+	    *.db *.db-wal *.db-shm

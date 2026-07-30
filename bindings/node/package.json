@@ -1,0 +1,16 @@
+{
+  "name": "@torafirma/skillrouter-native",
+  "version": "1.1.0",
+  "private": true,
+  "description": "N-API binding for the deterministic Torafirma Skill Router",
+  "main": "index.js",
+  "gypfile": true,
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "test": "node -e \"require('./build/Release/skillrouter.node')\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

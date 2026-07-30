@@ -1,0 +1,145 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag"
+        required: true
+        default: "v1.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: skill-router
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: |
+          make clean
+          make test
+          make
+          make capi
+      - name: Stage Linux package
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="../dist/skill-router-linux-x64-1.1.0"
+          mkdir -p "$stage/docs"
+          cp skillrouter libskillrouter.a libskillrouter.so skilllib_c.h "$stage/"
+          cp ../README.md ../WHITEPAPER.md ../PROOF_SKETCH.md "$stage/"
+          cp ../docs/RANKING_AND_IDENTITY_CONTRACT.md ../docs/C_ABI.md "$stage/docs/"
+          printf '%s\n' "$GITHUB_SHA" > "$stage/SOURCE.txt"
+          tar -C ../dist -czf ../dist/skill-router-linux-x64-1.1.0.tar.gz \
+            skill-router-linux-x64-1.1.0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: dist/skill-router-linux-x64-1.1.0.tar.gz
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: skill-router
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build and test
+        shell: cmd
+        run: |
+          build_windows_msvc.bat
+          build\test_library.exe
+          build\test_c_api.exe
+      - name: Stage Windows package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = "..\dist\skill-router-windows-x64-1.1.0"
+          New-Item -ItemType Directory -Force "$stage\docs" | Out-Null
+          Copy-Item build\skillrouter_msvc.exe "$stage\skillrouter.exe"
+          Copy-Item build\skillrouter_c.dll,build\skillrouter_c.lib,skilllib_c.h $stage
+          Copy-Item ..\README.md,..\WHITEPAPER.md,..\PROOF_SKETCH.md $stage
+          Copy-Item ..\docs\RANKING_AND_IDENTITY_CONTRACT.md,..\docs\C_ABI.md "$stage\docs"
+          [IO.File]::WriteAllText("$stage\SOURCE.txt", "${env:GITHUB_SHA}`n")
+          Compress-Archive -Path "$stage\*" `
+            -DestinationPath "..\dist\skill-router-windows-x64-1.1.0.zip" `
+            -CompressionLevel Optimal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: dist/skill-router-windows-x64-1.1.0.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*-release"
+          path: dist
+          merge-multiple: true
+      - name: Assemble signed release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp WHITEPAPER.md PROOF_SKETCH.md dist/
+          cp docs/MATH_WALKTHROUGH.md docs/HACKER_NEWS_DRAFT.md dist/
+          (
+            cd dist
+            sha256sum \
+              skill-router-linux-x64-1.1.0.tar.gz \
+              skill-router-windows-x64-1.1.0.zip \
+              WHITEPAPER.md PROOF_SKETCH.md \
+              MATH_WALKTHROUGH.md HACKER_NEWS_DRAFT.md \
+              > SHA256SUMS
+          )
+
+          export GNUPGHOME="$RUNNER_TEMP/skillrouter-release-gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          cat > "$RUNNER_TEMP/release-key.batch" <<'EOF'
+          Key-Type: RSA
+          Key-Length: 3072
+          Name-Real: Torafirma Skill Router Release 1.1.0
+          Name-Email: skillrouter-release@torafirma.invalid
+          Expire-Date: 30d
+          %no-protection
+          %commit
+          EOF
+          gpg --batch --generate-key "$RUNNER_TEMP/release-key.batch"
+          fingerprint="$(gpg --batch --with-colons --fingerprint |
+            awk -F: '$1=="fpr"{print $10; exit}')"
+          printf '%s\n' "$fingerprint" > dist/RELEASE_KEY_FINGERPRINT.txt
+          gpg --batch --armor --detach-sign --output dist/SHA256SUMS.asc dist/SHA256SUMS
+          gpg --batch --armor --export "$fingerprint" > dist/RELEASE_PUBKEY.asc
+          rm -rf "$GNUPGHOME"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="$INPUT_TAG"
+          fi
+          gh release create "$tag" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "Torafirma Skill Router ${tag#v}" \
+            --notes-file releases/v1.1.0/RELEASE_NOTES.md

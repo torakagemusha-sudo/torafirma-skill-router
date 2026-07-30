@@ -1,0 +1,15 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "torafirma-skillrouter"
+version = "1.1.0"
+description = "Direct C++ binding for the deterministic Torafirma Skill Router"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Thomas Helm" }]
+
+[tool.scikit-build]
+cmake.source-dir = "."
+wheel.packages = []
