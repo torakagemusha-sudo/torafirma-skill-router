@@ -60,6 +60,19 @@ int main() {
   skilllib_buffer_free(&search);
 
   skilllib_buffer_t fetched{};
+  assert(skilllib_fetch(lib, "c-api-test", "c-api-test", "",
+                        generation.c_str(), &fetched) ==
+         SKILLLIB_INVALID_ARGUMENT);
+  assert(std::string(skilllib_last_error(lib)).find("expected_revision") !=
+         std::string::npos);
+  assert(fetched.data == nullptr && fetched.len == 0);
+
+  assert(skilllib_fetch(lib, "c-api-test", "c-api-test", revision.c_str(),
+                        "", &fetched) == SKILLLIB_INVALID_ARGUMENT);
+  assert(std::string(skilllib_last_error(lib)).find("expected_catalog_generation") !=
+         std::string::npos);
+  assert(fetched.data == nullptr && fetched.len == 0);
+
   assert(skilllib_fetch(lib, "c-api-test", "c-api-test",
                         revision.c_str(), generation.c_str(), &fetched) ==
          SKILLLIB_OK);

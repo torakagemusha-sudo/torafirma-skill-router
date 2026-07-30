@@ -177,7 +177,7 @@ void skilllib_close(skilllib_t* lib) {
 }
 
 const char* skilllib_last_error(const skilllib_t* lib) {
-  return lib ? lib->last_error.c_str() : "skilllib handle is null";
+  return lib ? lib->last_error.c_str() : "skillib handle is null";
 }
 
 void skilllib_buffer_free(skilllib_buffer_t* buffer) {
@@ -188,9 +188,9 @@ void skilllib_buffer_free(skilllib_buffer_t* buffer) {
 }
 
 skilllib_status_t skilllib_register(skilllib_t* lib,
-                                    const char* skill_md_path,
+                                   const char* skill_md_path,
                                     const char* keywords,
-                                    skilllib_buffer_t* out_json) {
+                                   skilllib_buffer_t* out_json) {
   if (out_json) {
     out_json->data = nullptr;
     out_json->len = 0;
@@ -246,8 +246,14 @@ skilllib_status_t skilllib_fetch(skilllib_t* lib,
     out_json->data = nullptr;
     out_json->len = 0;
   }
-  if (!lib || !lib->impl || !skill_id || !*skill_id || !out_json)
-    return fail(lib, "invalid fetch arguments", SKILLLIB_INVALID_ARGUMENT);
+  if (!lib || !lib->impl || !skill_id || !*skill_id ||
+      !expected_revision || !*expected_revision ||
+      !expected_catalog_generation || !*expected_catalog_generation ||
+      !out_json)
+    return fail(lib,
+                "fetch requires skill_id, expected_revision, and "
+                "expected_catalog_generation",
+                SKILLLIB_INVALID_ARGUMENT);
   try {
     clear_error(lib);
     const auto result = lib->impl->fetch(

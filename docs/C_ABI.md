@@ -11,7 +11,7 @@
 - Handles are opaque and closed with `skilllib_close`.
 - The most recent handle-local diagnostic is available through `skilllib_last_error`.
 - Payloads are UTF-8 JSON except `skilllib_catalog_generation`, which returns a UTF-8 `sha256:` string.
-- Consumer fetch should always supply both `expected_revision` and `expected_catalog_generation`.
+- Fetch requires non-empty `expected_revision` and `expected_catalog_generation` copied from the selected search result; empty values fail closed with `SKILLLIB_INVALID_ARGUMENT`.
 
 The ABI deliberately does not return unmanaged `const char*` result buffers. Such an interface leaves ownership, lifetime, reentrancy, and error distinction undefined.
 
@@ -39,7 +39,7 @@ if (status == SKILLLIB_OK) {
       &result);
 }
 
-if (status == SKILLLIB_OK) {
+if (status == SKILLIB_OK) {
   fwrite(result.data, 1, result.len, stdout);
   skilllib_buffer_free(&result);
 } else if (lib) {

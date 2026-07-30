@@ -84,8 +84,8 @@ SKILLLIB_API skilllib_status_t skilllib_search(
 
 /*
  * JSON result: verified body and identity tuple.
- * Consumer callers should always provide expected_revision and
- * expected_catalog_generation from the search result.
+ * expected_revision and expected_catalog_generation are mandatory and must
+ * be copied from the selected search result. Empty values fail closed.
  */
 SKILLLIB_API skilllib_status_t skilllib_fetch(
     skilllib_t* lib,
@@ -96,7 +96,7 @@ SKILLLIB_API skilllib_status_t skilllib_fetch(
     skilllib_buffer_t* out_json);
 
 /* UTF-8 string result containing the current sha256: catalog generation. */
-SKILLLIB_API skilllib_status_t skilllib_catalog_generation(
+SKILLIB_API skilllib_status_t skilllib_catalog_generation(
     skilllib_t* lib,
     skilllib_buffer_t* out_generation);
 
