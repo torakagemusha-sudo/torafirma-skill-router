@@ -96,7 +96,7 @@ SKILLLIB_API skilllib_status_t skilllib_fetch(
     skilllib_buffer_t* out_json);
 
 /* UTF-8 string result containing the current sha256: catalog generation. */
-SKILLIB_API skilllib_status_t skilllib_catalog_generation(
+SKILLLIB_API skilllib_status_t skilllib_catalog_generation(
     skilllib_t* lib,
     skilllib_buffer_t* out_generation);
 
