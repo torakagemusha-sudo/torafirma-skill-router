@@ -97,17 +97,13 @@ try {
     Copy-Item -LiteralPath (Join-Path $work "build\skillrouter_c.dll") -Destination $stage
     Copy-Item -LiteralPath (Join-Path $work "build\skillrouter_c.lib") -Destination $stage
 
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "..\WHITEPAPER.md") -Destination $stage
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "..\PROOF_SKETCH.md") -Destination $stage
-
     $stageDocs = Join-Path $stage "docs"
     New-Item -ItemType Directory -Path $stageDocs | Out-Null
     foreach ($doc in @(
         "RANKING_AND_IDENTITY_CONTRACT.md",
         "ARCHITECTURE_MEASUREMENT_LEDGER.md",
         "INTEGRATION_PATTERNS.md",
-        "C_ABI.md",
-        "MATH_WALKTHROUGH.md"
+        "C_ABI.md"
     )) {
         Copy-Item -LiteralPath (Join-Path (Join-Path $PSScriptRoot "..\docs") $doc) `
             -Destination $stageDocs
