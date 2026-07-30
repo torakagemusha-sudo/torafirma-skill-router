@@ -8,7 +8,7 @@
 
 We present a deterministic, content-addressed routing system for agent skills. Exact skill bodies are identified by SHA-256 revisions; a published catalog is committed by hashing an injective canonical serialization; routing is the exact argmax of an explicit bounded utility function combining lexical tiers, SQLite FTS5, bounded edit distance, lifecycle state, and observed usage telemetry. The system contains no vector database, learned classifier, embedding model, or hidden priority term.
 
-The algebraic object is not the set of raw digest strings. It is the set of finite collections of immutable, content-addressed revision records under union. This forms a commutative idempotent monoid. A deterministic publication projection selects the active catalog, and SHA-256 supplies a computational commitment to its canonical byte representation. Equality of catalog generations therefore gives computational evidence of catalog equality under the collision-resistance assumption; it is not an information-theoretic proof.
+The algebraic object is not the set of raw digest strings. It is the set of finite collections of immutable, content-addressed revision records under union. This forms a commutative idempotent monoid. A deterministic catalog projection defines the serialized catalog state, and SHA-256 supplies a computational commitment to its canonical byte representation. Equality of catalog generations therefore gives computational evidence of catalog equality under the collision-resistance assumption; it is not an information-theoretic proof.
 
 The reference implementation is a local-first C++20 engine backed by SQLite. It provides explicit score decomposition, deterministic tie-breaking, revision-pinned fetch, catalog-generation pinning, append-only decision receipts, and separation between read-only consumers and privileged publishers.
 
@@ -125,9 +125,9 @@ A catalog is a deterministic projection
 P_\pi:\mathcal{R}\rightarrow\mathcal{C},
 \]
 
-parameterized by publication policy \(\pi\). The current implementation stores at most one admitted row per logical `skill_id`, normalizes `INDEXED` and `ACTIVE` to publication state `AVAILABLE`, and excludes `ARCHIVED` skills unless explicitly requested.
+parameterized by publication policy \(\pi\). The current implementation stores at most one current row per logical `skill_id`. Catalog generation commits every stored row, normalizing `INDEXED` and `ACTIVE` to publication state `AVAILABLE`; `ARCHIVED` rows remain part of the generation commitment. Search admissibility is a separate projection that excludes `ARCHIVED` rows unless `include_archived` is explicitly enabled.
 
-The projection is deliberately separate from revision storage: content addressability determines what a body is; publication policy determines whether it is eligible.
+The projection is deliberately separate from revision storage: content addressability determines what a body is; publication policy determines whether it is eligible for a given search.
 
 ### 2.4 Canonical serialization
 
@@ -137,7 +137,7 @@ For a published catalog \(C\), rows are ordered by ascending `skill_id`. Each fi
 L(x)=\operatorname{decimal}(|x|)\,\|\,\texttt{:}\,\|\,x\,\|\,\texttt{;},
 \]
 
-where \(|x|\) is the byte length of the UTF-8 field. The current generation encoding is
+where \(|x|\) is the byte length of the stored string; protocol-facing text is intended to be UTF-8, while the serialization itself is defined over bytes. The current generation encoding is
 
 \[
 \operatorname{Canon}(C)=
@@ -151,285 +151,6 @@ Because every field is length-prefixed and each record has a fixed arity, the en
 \operatorname{Canon}(C_A)=\operatorname{Canon}(C_B)\Rightarrow C_A=C_B.
 \]
 
-The catalog generation is
+The catallog generation is
 
-\[
-G(C)=\texttt{"sha256:"}\,\|\,H(\operatorname{Canon}(C)).
-\]
-
-Under collision resistance:
-
-\[
-G(C_A)=G(C_B)
-\Longrightarrow_{\text{computational}}
-\operatorname{Canon}(C_A)=\operatorname{Canon}(C_B).
-\]
-
-This is a computational commitment, not a logical biconditional guaranteed against an adversary with a SHA-256 collision.
-
-## 3. Ranking as Utility Maximization
-
-### 3.1 Query normalization
-
-A query \(q\) is lower-cased, tokenized over alphanumeric and underscore characters, deduplicated in first-occurrence order, filtered by the public stopword set, and stripped of one-character tokens. Let the resulting ordered set be \(T(q)\).
-
-The query digest is
-
-\[
-Q(q)=\texttt{"sha256:"}\,\|\,H(\operatorname{join}(T(q))).
-\]
-
-### 3.2 Exact lexical utility
-
-For token \(t\) and skill \(s\), only the highest matching tier contributes:
-
-\[
-e(t,s)=
-\begin{cases}
-3,&t\in K_s\\
-2,&t\in N_s\land t\notin K_s\\
-1,&t\in D_s\land t\notin(K_s\cup N_s)\\
-0,&\text{otherwise}.
-\end{cases}
-\]
-
-Then
-
-\[
-E(s,q)=\sum_{t\in T(q)} e(t,s).
-\]
-
-### 3.3 FTS utility
-
-FTS5 indexes `skill_id`, description, and keywords with tokenizer `porter unicode61`. BM25 column weights are \(2,1,3\). Raw BM25 output is negated so that larger is better.
-
-For the current FTS result population:
-
-\[
-F(s,q)=
-\begin{cases}
-0,&s\text{ has no FTS match}\\
-1,&F_{\max}=F_{\min}\\
-0.5+0.5\frac{F_{\mathrm{raw}}(s,q)-F_{\min}}
-{F_{\max}-F_{\min}},&\text{otherwise}.
-\end{cases}
-\]
-
-Therefore \(F(s,q)\in[0,1]\).
-
-### 3.4 Bounded fuzzy utility
-
-Fuzzy matching is applied only to query tokens that miss every exact tier. For token \(t\),
-
-\[
-\delta(t)=
-\begin{cases}
-1,&|t|\le4\\
-2,&|t|>4.
-\end{cases}
-\]
-
-Let \(d(t,s)\) be the minimum Levenshtein distance between \(t\) and any keyword, name, or description token, evaluated only up to \(\delta(t)\). The contribution is
-
-\[
-z(t,s)=
-\begin{cases}
-1-\frac{d(t,s)}{|t|},&d(t,s)\le\delta(t)\\
-0,&\text{otherwise}.
-\end{cases}
-\]
-
-Then
-
-\[
-Z(s,q)=\frac{1}{|T(q)|}\sum_{t\in T(q)}z(t,s),
-\qquad Z(s,q)\in[0,1].
-\]
-
-### 3.5 Base utility
-
-For hybrid mode:
-
-\[
-B(s,q)=E(s,q)+0.6F(s,q)+0.35Z(s,q).
-\]
-
-Since
-
-\[
-0.6F+0.35Z\le0.95<1,
-\]
-
-non-exact evidence cannot overturn a full one-point exact-tier advantage. It can add recall and resolve ties within an exact tier.
-
-### 3.6 Telemetry as an explicit empirical prior
-
-Let \(a_s\) be returned-search exposure count and \(f_s\) successful fetch count. Define
-
-\[
-c_s=
-\begin{cases}
-f_s/a_s,&a_s>0\\
-0,&a_s=0.
-\end{cases}
-\]
-
-The multiplier is
-
-\[
-T(s)=1+\min\left(
-0.5,\;
-0.5c_s+0.05\log(1+f_s)
-\right).
-\]
-
-Thus \(T(s)\in[1,1.5]\). It is non-decreasing in both \(c_s\) and \(f_s\) before saturation and constant after saturation. Calling it a â€œBayesian priorâ€ is an interpretation, not a conjugate Bayesian derivation: it is an explicit history-dependent empirical prior whose sufficient statistics are retained in telemetry.
-
-The exposure denominator counts only candidates returned in bounded top-\(N\). It is therefore selection-biased and must not be represented as an unbiased estimator of global relevance.
-
-### 3.7 Lifecycle multiplier
-
-\[
-D(s)=
-\begin{cases}
-0.3,&\sigma_s=\texttt{DEPRECATED}\\
-1,&\text{otherwise}.
-\end{cases}
-\]
-
-Archived skills are removed from the admissible set by default.
-
-### 3.8 Closed-form selection
-
-Final utility is
-
-\[
-U(s\mid q)=B(s,q)T(s)D(s).
-\]
-
-Let \(\mathcal{A}(q,C)\) be the admissible catalog candidates with \(B(s,q)>0\). The selected skill is
-
-\[
-s^\star=
-\arg\max_{s\in\mathcal{A}(q,C)}
-\left(U(s\mid q),-\operatorname{lex}(i_s)\right),
-\]
-
-equivalently: descending final score, then ascending `skill_id`.
-
-The claim is precise: the router computes the exact argmax of this declared utility over the evaluated candidate set. It is not claimed to be a universal optimum over every possible semantic representation.
-
-## 4. State and Revision Invariants
-
-### 4.1 Operational lifecycle
-
-The normal lifecycle is
-
-\[
-\texttt{REGISTERED}\rightarrow
-\texttt{INDEXED}\rightarrow
-\texttt{ACTIVE}
-\leftrightarrow
-\texttt{STALE}\rightarrow
-\texttt{DEPRECATED}\rightarrow
-\texttt{ARCHIVED}.
-\]
-
-This is a deterministic finite-state transition system, not a Markov chain. Administrative restoration or re-indexing can introduce additional explicit transitions. The transition relation contains cycles, while the associated event history remains append-only.
-
-### 4.2 Revision integrity
-
-For a successful pinned fetch of skill \(s\):
-
-\[
-r_{\mathrm{expected}}
-=
-r_{\mathrm{indexed}}
-=
-H(b_{\mathrm{observed}}).
-\]
-
-The router checks catalog generation first, hashes the file immediately before return, compares observed and indexed revisions, compares observed and expected revisions, and only then returns the body and increments successful-fetch telemetry.
-
-### 4.3 Consumer and operator behavior
-
-An operator may mark a drifted row `STALE`. A read-only consumer cannot mutate the catalog; it fails closed and emits a drift receipt into separate writable telemetry. This separation is deliberate: consumer processes should not possess publication authority.
-
-### 4.4 Generation pinning
-
-A search returns \(G(C_t)\). Fetch must present the same generation. If publication changes between search and fetch,
-
-\[
-G(C_t)\ne G(C_{t+1}),
-\]
-
-the fetch terminates with `CATALOG_GENERATION_MISMATCH`, even when the selected skill body itself is unchanged. This prevents a decision made against one admitted catalog from being silently completed against another.
-
-## 5. Performance and Correctness
-
-### 5.1 Current complexity
-
-The reference implementation currently scans admitted catalog rows to combine exact, fuzzy, lifecycle, and telemetry components. Let:
-
-- \(n\) be catalog size;
-- \(m=|T(q)|\);
-- \(p_s\) be the searchable token pool for skill \(s\);
-- \(k\) be the number of FTS matches.
-
-The current upper-bound structure is approximately
-
-\[
-O\left(
-T_{\mathrm{FTS}}(q)+
-\sum_{s=1}^{n}m\,p_s\,\delta^2+
-n\log n
-\right),
-\]
-
-with edit-distance work bounded by maximum distance \(1\) or \(2\), early row termination, query-size limits, and skill-size limits. The implementation is therefore deterministic and bounded, but not yet asymptotically optimized for very large catalogs.
-
-A future candidate-first implementation can reduce fuzzy rescoring to a bounded candidate set \(k\), yielding approximately
-
-\[
-T_{\mathrm{FTS}}(q)+O(km\bar p)+O(k\log k).
-\]
-
-No unmeasured throughput claim is made here. Benchmarks must report corpus construction, CPU, SQLite build, FTS availability, warm/cold cache, query distribution, top-\(N\), and telemetry state.
-
-### 5.2 Correctness surfaces
-
-The 1.1.0 contract is falsified if any of the following occurs:
-
-1. two byte-distinct skill bodies receive the same revision without a SHA-256 collision;
-2. a pinned fetch returns a body after revision or generation mismatch;
-3. equal inputs and telemetry snapshots produce a different ordered result;
-4. an undeclared score component changes rank;
-5. a read-only consumer mutates publication state;
-6. catalog serialization is ambiguous;
-7. an exact one-tier advantage is overturned by FTS plus fuzzy evidence alone.
-
-These properties are suitable for deterministic regression, cross-language conformance, and property-based testing.
-
-## 6. Multi-Language Contract
-
-The canonical portability boundary is a C ABI with:
-
-- opaque handles;
-- explicit status codes;
-- caller-visible error retrieval;
-- allocated output buffers with a matching free function;
-- UTF-8 JSON payloads;
-- no exception propagation across the ABI;
-- explicit revision and catalog-generation parameters.
-
-Python may additionally bind C++ directly through pybind11 for ergonomics. Node uses N-API. Rust generates the raw ABI with bindgen and wraps ownership in a safe `Drop` type. All bindings must preserve the same ranking policy, identity tuple, and failure statuses.
-
-## 7. Conclusion
-
-The router is deterministic because every routing input and every ranking term is explicit. It is content-addressed because loaded instructions are pinned to SHA-256 body revisions. It is consensus-capable because a canonical catalog projection has one generation commitment. It is explainable because every score component and tie-break is emitted. It is local-first because SQLite and the filesystem are sufficient.
-
-The defensible claim is not that every routing problem has been solved. The claim is narrower and stronger:
-
-> For a declared lexical utility, a declared catalog snapshot, and a declared telemetry snapshot, Skill Router computes a reproducible exact selection and refuses to load bytes that are not the bytes that were selected.
-
-No black box is required for that guarantee.
+\[)¡¤õqÑ•áÑÑÑì‰Í¡„ÈÔØè‰õp±qñp± ¡q½Á•É…Ñ½É¹…µ•í…¹½¹ô¡¤¤¸)qt()U¹‘•È½±±¥Í¥½¸É•Í¥ÍÑ…¹”è()ql)¡}¤õ¡}¤)q1½¹É¥¡Ñ…ÉÉ½Ý}íqÑ•áÑí½µÁÕÑ…Ñ¥½¹…±õô)q½Á•É…Ñ½É¹…µ•í…¹½¹ô¡}¤õq½Á•É…Ñ½É¹…µ•í…¹½¹ô¡}¤¸)qt()Q¡¥Ì¥Ì„½µÁÕÑ…Ñ¥½¹…°½µµ¥Ñµ•¹Ð°¹½Ð„±½¥…°‰¥½¹‘¥Ñ¥½¹…°Õ…É…¹Ñ••……¥¹ÍÐ…¸…‘Ù•ÉÍ…ÉäÝ¥Ñ „M!´ÈÔØ½±±¥Í¥½¸¸((ŒŒ€Ì¸I…¹­¥¹œ…ÌUÑ¥±¥Ñä5…á¥µ¥é…Ñ¥½¸((ŒŒŒ€Ì¸ÄEÕ•Éä¹½Éµ…±¥é…Ñ¥½¸()ÅÕ•Éäp¡Åp¤¥Ì±½Ý•Èµ…Í•°Ñ½­•¹¥é•½Ù•È…±Á¡…¹Õµ•É¥Œ…¹Õ¹‘•ÉÍ½É”¡…É…Ñ•ÉÌ°‘•‘ÕÁ±¥…Ñ•¥¸™¥ÉÍÐµ½ÕÉÉ•¹”½É‘•È°™¥±Ñ•É•‰äÑ¡”ÁÕ‰±¥ŒÍÑ½ÁÝ½ÉÍ•Ð°…¹ÍÑÉ¥ÁÁ•½˜½¹”µ¡…É…Ñ•ÈÑ½­•¹Ì¸1•ÐÑ¡”É•ÍÕ±Ñ¥¹œ½É‘•É•Í•Ð‰”p¡P¡Ä¥p¤¸()Q¡”ÅÕ•Éä‘¥•ÍÐ¥Ì()ql)D¡Ä¤õqÑ•áÑÑÑì‰Í¡„ÈÔØè‰õp±qñp± ¡q½Á•É…Ñ½É¹…µ•í©½¥¹ô¡P¡Ä¤¤¤¸)qt((ŒŒŒ€Ì¸Èá…Ð±•á¥…°ÕÑ¥±¥Ñä()½ÈÑ½­•¸p¡Ñp¤…¹Í­¥±°p¡Íp¤°½¹±äÑ¡”¡¥¡•ÍÐµ…Ñ¡¥¹œÑ¥•È½¹ÑÉ¥‰ÕÑ•Ìè()ql)”¡Ð±Ì¤ô)q‰•¥¹í…Í•Íô(Ì°™Ñq¥¸-}Íqp(È°™Ñq¥¸9}Íq±…¹Ñq¹½Ñ¥¸-}Íqp(Ä°™Ñq¥¸}Íq±…¹Ñq¹½Ñ¥¸¡-}ÍqÕÀ9}Ì¥qp(À°™qÑ•áÑí½Ñ¡•ÉÝ¥Í•ô¸)q•¹‘í…Í•Íô)qt()Q¡•¸()ql)¡Ì±Ä¤õqÍÕµ}íÑq¥¸P¡Ä¥ô”¡Ð±Ì¤¸)qt((ŒŒŒ€Ì¸ÌQLÕÑ¥±¥Ñä()QLÔ¥¹‘•á•ÌÍ­¥±±}¥‘€°‘•ÍÉ¥ÁÑ¥½¸°…¹­•åÝ½É‘ÌÝ¥Ñ Ñ½­•¹¥é•ÈÁ½ÉÑ•ÈÕ¹¥½‘”ØÅ€¸	4ÈÔ½±Õµ¸Ý•¥¡ÑÌ…É”p È°Ä°Íp¤¸I…Ü	4ÈÔ½ÕÑÁÕÐ¥Ì¹•…Ñ•Í¼Ñ¡…Ð±…É•È¥Ì‰•ÑÑ•È¸()½ÈÑ¡”ÕÉÉ•¹ÐQLÉ•ÍÕ±ÐÁ½ÁÕ±…Ñ¥½¸è()ql)¡Ì±Ä¤ô)q‰•¥¹í…Í•Íô(À°™ÍqÑ•áÑì¡…Ì¹¼QLµ…Ñ¡õqp(Ä°™}íqµ…áôõ}íqµ¥¹õqp(À¸Ô¬À¸Õq™É…í}íqµ…Ñ¡ÉµíÉ…Ýõô¡Ì±Ä¤µ}íqµ¥¹õô)í}íqµ…áôµ}íqµ¥¹õô°™qÑ•áÑí½Ñ¡•ÉÝ¥Í•ô¸)q•¹‘í…Í•Íô)qt()Q¡•É•™½É”p¡¡Ì±Ä¥q¥¹lÀ°Åup¤¸(ŒŒŒ€Ì¸Ð	½Õ¹‘•™ÕééäÕÑ¥±¥Ñä()Õééäµ…Ñ¡¥¹œ¥Ì…ÁÁ±¥•½¹±äÑ¼ÅÕ•ÉäÑ½­•¹ÌÑ¡…Ðµ¥ÍÌ•Ù•Éä•á…ÐÑ¥•È¸½ÈÑ½­•¸p¡Ñp¤°()ql)q‘•±Ñ„¡Ð¤ô)q‰•¥¹í…Í•Íô(Ä°™ñÑñq±”Ñqp(È°™ÑðøÐ¸)q•¹‘í…Í•Íô)qt()1•Ðp¡¡Ð±Ì¥p¤‰”Ñ¡”µ¥¹¥µÕ´1•Ù•¹Í¡Ñ•¥¸‘¥ÍÑ…¹”‰•ÑÝ••¸p¡Ñp¤…¹…¹ä­•åÝ½É°¹…µ”°½È‘•ÍÉ¥ÁÑ¥½¸Ñ½­•¸°•Ù…±Õ…Ñ•½¹±äÕÀÑ¼p¡q‘•±Ñ„¡Ð¥p¤¸Q¡”½¹ÑÉ¥‰ÕÑ¥½¸¥Ì()ql)è¡Ð±Ì¤ô)q‰•¥¹í…Í•Íô(Äµq™É…í¡Ð±Ì¥õíñÑñô°™¡Ð±Ì¥q±•q‘•±Ñ„¡Ð¥qp(À°™qÑ•áÑí½Ñ¡•ÉÝ¥Í•ô¸)q•¹‘í…Í•Íô)qt()Q¡•¸()ql)h ¡Ì±Ä¤õq™É…ìÅõíñP¡Ä¥ñõqÍÕµ}íÑq¥¸P¡Ä¥õè¡Ð±Ì¤°)qÅÅÕ…h¡Ì±Ä¥q¥¹lÀ°Åt¸)qt((ŒŒŒ€Ì¸Ô	…Í”ÕÑ¥±¥Ñä()½È¡å‰É¥µ½‘”è()ql)¡Ì±Ä¤õ¡Ì±Ä¤¬À¸Ù¡Ì±Ä¤¬À¸ÌÕh¡Ì±Ä¤¸)qt()M¥¹”()ql(À¸Ù¬À¸ÌÕiq±”À¸äÔðÄ°)qt()¹½¸µ•á…Ð•Ù¥‘•¹”…¹¹½Ð½Ù•ÉÑÕÉ¸„™Õ±°½¹”µÁ½¥¹Ð•á…ÐµÑ¥•È…‘Ù…¹Ñ…”¸%Ð…¸…‘É•…±°…¹É•Í½±Ù”Ñ¥•ÌÝ¥Ñ¡¥¸…¸•á…ÐÑ¥•È¸((ŒŒŒ€Ì¸ØQ•±•µ•ÑÉä…Ì…¸•áÁ±¥¥Ð•µÁ¥É¥…°ÁÉ¥½È()1•Ðp¡…}Íp¤‰”É•ÑÕÉ¹•µÍ•…É •áÁ½ÍÕÉ”½Õ¹Ð…¹p¡™}Íp¤ÍÕ•ÍÍ™Õ°™•Ñ ½Õ¹Ð¸•™¥¹”()ql)}Ìô)q‰•¥¹í…Í•Íô)™}Ì½…}Ì°™…}ÌøÁqp(À°™…}ÌôÀ¸)q•¹‘í…Í•Íô)qt()Q¡”µÕ±Ñ¥Á±¥•È¥Ì()ql)P¡Ì¤ôÄ­qµ¥¹q±•™Ð (À¸Ô±pì
