@@ -26,3 +26,8 @@ target_link_libraries(skillrouter_native PRIVATE skillrouter_sqlite)
 if(UNIX AND NOT APPLE)
   target_link_libraries(skillrouter_native PRIVATE pthread dl)
 endif()
+
+install(TARGETS skillrouter_native
+  LIBRARY DESTINATION .
+  RUNTIME DESTINATION .
+)
