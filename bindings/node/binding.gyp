@@ -14,6 +14,7 @@
         "SQLITE_THREADSAFE=1",
         "SQLITE_ENABLE_FTS5"
       ],
+      "cflags_cc!": ["-fno-exceptions"],
       "cflags_cc": ["-std=c++20", "-fexceptions"],
       "conditions": [
         ["OS=='win'", {
