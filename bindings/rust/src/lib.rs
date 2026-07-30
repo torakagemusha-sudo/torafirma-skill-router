@@ -44,8 +44,9 @@ impl SkillLibrary {
     pub fn register(&mut self, path: &str, keywords: &str) -> Result<Value> {
         let path = cstring(path)?;
         let keywords = cstring(keywords)?;
+        let raw = self.raw;
         self.json_call(|out| unsafe {
-            ffi::skilllib_register(self.raw, path.as_ptr(), keywords.as_ptr(), out)
+            ffi::skilllib_register(raw, path.as_ptr(), keywords.as_ptr(), out)
         })
     }
 
@@ -58,9 +59,10 @@ impl SkillLibrary {
     ) -> Result<Value> {
         let query = cstring(query)?;
         let mode = cstring(mode)?;
+        let raw = self.raw;
         self.json_call(|out| unsafe {
             ffi::skilllib_search(
-                self.raw,
+                raw,
                 query.as_ptr(),
                 top_n,
                 mode.as_ptr(),
@@ -81,9 +83,10 @@ impl SkillLibrary {
         let expected_revision = cstring(expected_revision)?;
         let catalog_generation = cstring(catalog_generation)?;
         let query_context = cstring(query_context)?;
+        let raw = self.raw;
         self.json_call(|out| unsafe {
             ffi::skilllib_fetch(
-                self.raw,
+                raw,
                 skill_id.as_ptr(),
                 query_context.as_ptr(),
                 expected_revision.as_ptr(),
