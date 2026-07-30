@@ -24,16 +24,10 @@ Three problems are resolved by one explicit contract:
 
 There is no embedding model, vector database, learned classifier, random tie-break, capability-graph distance, or hidden manual priority.
 
-The mathematical scope is precise: immutable content-addressed revision records form a finite-union monoid; SHA-256 commits to the deterministic published projection. The hash function itself is not claimed to be the monoid operation.
+Technical contracts:
 
-Read:
-
-- [A Monoid Over Hashes](WHITEPAPER.md)
-- [Proof Sketch](PROOF_SKETCH.md)
 - [Ranking and Load-Time Identity Contract](docs/RANKING_AND_IDENTITY_CONTRACT.md)
 - [Stable C ABI](docs/C_ABI.md)
-- [Fifteen-Minute Math Walkthrough](docs/MATH_WALKTHROUGH.md)
-- [Hacker News Submission Draft](docs/HACKER_NEWS_DRAFT.md)
 
 ## What changed in 1.1.0
 
@@ -292,23 +286,18 @@ The MCP surface exposes:
 ```text
 .
 |-- README.md
-|-- WHITEPAPER.md
-|-- PROOF_SKETCH.md
 |-- bindings/
 |   |-- python/
 |   |-- node/
 |   `-- rust/
 |-- docs/
 |   |-- C_ABI.md
-|   |-- HACKER_NEWS_DRAFT.md
-|   |-- MATH_WALKTHROUGH.md
 |   |-- INTEGRATION_PATTERNS.md
 |   |-- RANKING_AND_IDENTITY_CONTRACT.md
 |   `-- ARCHITECTURE_MEASUREMENT_LEDGER.md
 |-- .github/workflows/
 |   |-- ci.yml
 |   `-- release.yml
-|-- releases/
 `-- skill-router/
     |-- main.cpp
     |-- skill_library.hpp
