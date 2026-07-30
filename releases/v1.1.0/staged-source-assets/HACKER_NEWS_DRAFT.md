@@ -2,7 +2,7 @@
 
 **Title**
 
-Show HN: A deterministic skill router using content hashes, SQLite FTS, and no embeddings
+Show HN: A deterministic skill algebra for AI agents – closed-form, no embeddings, single researcher
 
 **Submission text**
 
