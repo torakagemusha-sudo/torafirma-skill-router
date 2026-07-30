@@ -35,7 +35,7 @@ jobs:
           stage="../dist/skill-router-linux-x64-1.1.0"
           mkdir -p "$stage/docs"
           cp skillrouter libskillrouter.a libskillrouter.so skilllib_c.h "$stage/"
-          cp ../README.md ../WHITEPAPER.md ../PROOF_SKETCH.md "$stage/"
+          cp ../README.md "$stage/"
           cp ../docs/RANKING_AND_IDENTITY_CONTRACT.md ../docs/C_ABI.md "$stage/docs/"
           printf '%s\n' "$GITHUB_SHA" > "$stage/SOURCE.txt"
           tar -C ../dist -czf ../dist/skill-router-linux-x64-1.1.0.tar.gz \
@@ -70,7 +70,7 @@ jobs:
           New-Item -ItemType Directory -Force "$stage\docs" | Out-Null
           Copy-Item build\skillrouter_msvc.exe "$stage\skillrouter.exe"
           Copy-Item build\skillrouter_c.dll,build\skillrouter_c.lib,skilllib_c.h $stage
-          Copy-Item ..\README.md,..\WHITEPAPER.md,..\PROOF_SKETCH.md $stage
+          Copy-Item ..\README.md $stage
           Copy-Item ..\docs\RANKING_AND_IDENTITY_CONTRACT.md,..\docs\C_ABI.md "$stage\docs"
           [IO.File]::WriteAllText("$stage\SOURCE.txt", "${env:GITHUB_SHA}`n")
           Compress-Archive -Path "$stage\*" `
@@ -96,15 +96,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp WHITEPAPER.md PROOF_SKETCH.md dist/
-          cp docs/MATH_WALKTHROUGH.md docs/HACKER_NEWS_DRAFT.md dist/
           (
             cd dist
             sha256sum \
               skill-router-linux-x64-1.1.0.tar.gz \
               skill-router-windows-x64-1.1.0.zip \
-              WHITEPAPER.md PROOF_SKETCH.md \
-              MATH_WALKTHROUGH.md HACKER_NEWS_DRAFT.md \
               > SHA256SUMS
           )
 
@@ -142,4 +138,4 @@ jobs:
           gh release create "$tag" dist/* \
             --target "$GITHUB_SHA" \
             --title "Torafirma Skill Router ${tag#v}" \
-            --notes-file releases/v1.1.0/RELEASE_NOTES.md
+            --generate-notes
