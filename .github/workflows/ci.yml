@@ -67,7 +67,7 @@ jobs:
       - name: Build and import Python binding
         run: |
           python -m pip install --upgrade pip build
-          python -m build bindings/python
+          python -m build --wheel bindings/python
           python -m pip install bindings/python/dist/*.whl
           python -c "import skillrouter_native; print(skillrouter_native.__version__)"
       - name: Build and load Node N-API binding
